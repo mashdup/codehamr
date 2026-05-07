@@ -8,6 +8,7 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 
+	"github.com/codehamr/codehamr/internal/cloud"
 	"github.com/codehamr/codehamr/internal/llm"
 )
 
@@ -160,6 +161,14 @@ func (m *Model) confirmActive(profile string) tea.Cmd {
 func (m *Model) rebuildClient() {
 	p := m.cfg.ActiveProfile()
 	m.cli = llm.New(m.cfg.ActiveURL(), p.LLM, p.Key)
+	// Drop the prior profile's cached BudgetStatus. m.budget is a single
+	// field with no profile association, so without this reset the footer
+	// keeps rendering hamrpass's "88% pass" segment after switching to a
+	// local profile that emits no X-Budget-* headers (nothing would
+	// overwrite it). A fresh BudgetStatus{} hides the segment until the
+	// new backend reports its own — local profiles stay clean, cloud
+	// profiles repopulate on the next applyDone or probe.
+	m.budget = cloud.BudgetStatus{}
 }
 
 func (m Model) cmdClear(_ []string) (tea.Model, tea.Cmd) {

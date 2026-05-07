@@ -628,6 +628,30 @@ func TestSlashModelSwitchDropsStickyFallbackState(t *testing.T) {
 	}
 }
 
+// TestSlashModelSwitchClearsStaleBudget pins down the footer-staleness bug:
+// after a hamrpass turn leaves m.budget set (e.g. 88% remaining), switching
+// to a profile that emits no X-Budget-* headers (local Ollama) would keep
+// rendering the old percentage forever because BudgetStatus.StatusSuffix()
+// only checks its own .Set field, not which profile produced it.
+// rebuildClient() is the documented "fresh slate after a switch" hook and
+// must drop the cached snapshot so the segment disappears until the new
+// backend (if any) reports its own budget.
+func TestSlashModelSwitchClearsStaleBudget(t *testing.T) {
+	m := newTestModel(t, func(http.ResponseWriter, *http.Request) {})
+	m.cfg.Models["local"] = &config.Profile{
+		LLM: "qwen", URL: "http://ollama:11434", Key: "", ContextSize: 32000,
+	}
+	m.budget = cloud.BudgetStatus{Set: true, Remaining: 0.88}
+	out, _ := m.runSlash("/models local")
+	final := out.(Model)
+	if final.budget.Set {
+		t.Fatalf("switching profiles must clear cached BudgetStatus, got %+v", final.budget)
+	}
+	if suf := final.budget.StatusSuffix(); suf != "" {
+		t.Fatalf("status suffix must be empty after switch, got %q", suf)
+	}
+}
+
 // TestSlashModelRejectsUnknown: unknown name is a quiet warn, not a switch.
 func TestSlashModelRejectsUnknown(t *testing.T) {
 	m := newTestModel(t, func(http.ResponseWriter, *http.Request) {})

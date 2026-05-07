@@ -156,13 +156,14 @@ type Client struct {
 	Token   string // optional; empty = no Authorization header
 	HTTP    *http.Client
 	// noReasoningEffort is set to true once the server returns the
-	// standard 400 saying it doesn't accept tools + reasoning_effort
-	// together on /v1/chat/completions (OpenAI's gpt-5.5+ does this —
-	// they push that combo onto /v1/responses). Sticky for the
-	// lifetime of the Client so subsequent turns skip straight to the
-	// supported shape. A `/models` switch builds a fresh Client and
-	// the flag resets, which is correct: the new endpoint may be a
-	// different provider with different rules.
+	// standard 400 saying it doesn't accept reasoning on this model:
+	// OpenAI gpt-5.5+ rejects tools + reasoning_effort on
+	// /v1/chat/completions (they push that combo onto /v1/responses),
+	// Ollama rejects reasoning_effort on non-thinking models like
+	// qwen3-coder. Sticky for the lifetime of the Client so subsequent
+	// turns skip straight to the supported shape. A `/models` switch
+	// builds a fresh Client and the flag resets, which is correct: the
+	// new endpoint may be a different provider with different rules.
 	noReasoningEffort bool
 }
 
@@ -286,20 +287,23 @@ func (c *Client) sendChat(parent context.Context, msgs []chmctx.Message, tools [
 }
 
 // postChat dispatches the chat request via doPost and on a standard 400
-// saying the server doesn't accept tools + reasoning_effort together drops
-// reasoning_effort for the lifetime of this Client and retries exactly
-// once. Detection is loose substring matching on the response body —
-// matching the param name plus "not supported" keeps the trigger precise
-// without parsing JSON shapes that may differ between providers. Probe
-// never sets ReasoningEffort, so its 400 path can never trip the flag.
+// saying the server doesn't accept reasoning drops reasoning_effort for
+// the lifetime of this Client and retries exactly once. Two flavours seen
+// in the wild, both caught by loose substring matching on the response
+// body: OpenAI gpt-5.5+ ("reasoning_effort … not supported") and Ollama
+// non-thinking models ("<model> does not support thinking"). Matching the
+// shared "not support" plus either signal keeps the trigger precise
+// without parsing JSON shapes that differ between providers. Probe never
+// sets ReasoningEffort, so its 400 path can never trip the flag.
 func (c *Client) postChat(parent context.Context, body chatRequest) (*http.Response, cloud.BudgetStatus, error) {
 	if c.noReasoningEffort {
 		body.ReasoningEffort = ""
 	}
 	resp, budget, errBody, err := c.doPost(parent, body)
 	if err != nil && body.ReasoningEffort != "" &&
-		bytes.Contains(errBody, []byte("reasoning_effort")) &&
-		bytes.Contains(errBody, []byte("not supported")) {
+		bytes.Contains(errBody, []byte("not support")) &&
+		(bytes.Contains(errBody, []byte("reasoning_effort")) ||
+			bytes.Contains(errBody, []byte("thinking"))) {
 		c.noReasoningEffort = true
 		body.ReasoningEffort = ""
 		resp, budget, _, err = c.doPost(parent, body)

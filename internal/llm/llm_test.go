@@ -531,3 +531,59 @@ func TestChatFallsBackWhenReasoningEffortRejected(t *testing.T) {
 		t.Fatalf("second turn must not resend reasoning_effort: %s", bodies[0])
 	}
 }
+
+// TestChatFallsBackWhenOllamaRejectsThinking: Ollama rejects
+// reasoning_effort on non-thinking models (e.g. qwen3-coder) with a 400
+// whose body says `<model> does not support thinking` — different shape
+// from OpenAI's reasoning_effort/not-supported message but the same
+// remedy. postChat must drop reasoning_effort, retry once, and stay
+// sticky for the rest of the Client's life so we don't re-trip the 400
+// every turn.
+func TestChatFallsBackWhenOllamaRejectsThinking(t *testing.T) {
+	var bodies []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		b, _ := io.ReadAll(r.Body)
+		bodies = append(bodies, string(b))
+		if strings.Contains(string(b), `"reasoning_effort"`) {
+			w.WriteHeader(400)
+			fmt.Fprintln(w, `{"error":"\"qwen3-coder-next:latest\" does not support thinking"}`)
+			return
+		}
+		sseOK(w, []string{
+			`{"choices":[{"delta":{"content":"ok"}}],"usage":{"completion_tokens":1}}`,
+		})
+	}))
+	defer srv.Close()
+
+	c := New(srv.URL, "qwen3-coder-next:latest", "")
+
+	// First turn: 400 → fallback → success.
+	for _, e := range collect(c.Chat(context.Background(), nil, nil)) {
+		if e.Kind == EventError {
+			t.Fatalf("first turn must succeed via fallback, got error: %v", e.Err)
+		}
+	}
+	if len(bodies) != 2 {
+		t.Fatalf("first turn should send initial + retry (2 requests), got %d", len(bodies))
+	}
+	if !strings.Contains(bodies[0], `"reasoning_effort"`) {
+		t.Fatalf("first attempt should send reasoning_effort: %s", bodies[0])
+	}
+	if strings.Contains(bodies[1], `"reasoning_effort"`) {
+		t.Fatalf("retry must drop reasoning_effort: %s", bodies[1])
+	}
+
+	// Second turn on the same Client: flag is sticky, no 400, no retry.
+	bodies = nil
+	for _, e := range collect(c.Chat(context.Background(), nil, nil)) {
+		if e.Kind == EventError {
+			t.Fatalf("second turn must not error: %v", e.Err)
+		}
+	}
+	if len(bodies) != 1 {
+		t.Fatalf("second turn should make exactly 1 request, got %d", len(bodies))
+	}
+	if strings.Contains(bodies[0], `"reasoning_effort"`) {
+		t.Fatalf("second turn must not resend reasoning_effort: %s", bodies[0])
+	}
+}
