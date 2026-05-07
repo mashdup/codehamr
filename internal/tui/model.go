@@ -312,57 +312,10 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return nm, cmd
 
 	case tea.WindowSizeMsg:
-		first := !m.splashShown
-		widthChanged := m.width > 0 && m.width != msg.Width
-		m.width, m.height = msg.Width, msg.Height
-		m.ta.SetWidth(msg.Width - 2)
-		if first || widthChanged {
-			// Glamour compiles a syntax stylesheet + template tree per
-			// build, so only rebuild when the wrap width actually
-			// changes — height-only events and intra-drag duplicates
-			// keep reusing the existing renderer.
-			if r, err := glamour.NewTermRenderer(glamour.WithStandardStyle("dark"),
-				glamour.WithWordWrap(max(msg.Width-4, 1))); err == nil {
-				m.renderer = r
-			}
-		}
-		m.recomputeLayout()
-		if first {
-			m.splashShown = true
-			m.outbox = append(m.outbox, m.splashLines()...)
-			return m, nil
-		}
-		if !widthChanged {
-			return m, nil
-		}
-		m.suppressView = true
-		m.resizeGen++
-		gen := m.resizeGen
-		return m, tea.Tick(resizeSettleDelay, func(time.Time) tea.Msg {
-			return resizeSettleMsg{gen: gen}
-		})
+		return m.handleWindowSize(msg)
 
 	case resizeSettleMsg:
-		if msg.gen != m.resizeGen {
-			return m, nil
-		}
-		m.suppressView = false
-		// tea.Sequence keeps order strict — Batch would race the
-		// clears with the writes. After the wipe every line below was
-		// emitted at the current width, so no previous-width row can
-		// soft-wrap into stair-steps.
-		cmds := []tea.Cmd{tea.ClearScreen, eraseScrollback}
-		if splash := strings.Join(m.splashLines(), "\n"); splash != "" {
-			cmds = append(cmds, tea.Println(splash))
-		}
-		if scroll := strings.TrimRight(m.scroll.String(), "\n"); scroll != "" {
-			cmds = append(cmds, tea.Println(scroll))
-		}
-		if len(m.outbox) > 0 {
-			cmds = append(cmds, tea.Println(strings.Join(m.outbox, "\n")))
-			m.outbox = nil
-		}
-		return m, tea.Sequence(cmds...)
+		return m.handleResizeSettle(msg)
 
 	case pingMsg:
 		m.connected = msg.ok
@@ -424,6 +377,69 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	m.ta, cmd = m.ta.Update(msg)
 	m.recomputeLayout()
 	return m, cmd
+}
+
+// handleWindowSize tracks the new dimensions, rebuilds the glamour
+// renderer when the wrap width changed, emits the splash on the very first
+// frame, and on a true width change starts the debounced resize-settle
+// cycle (suppressView until the settle tick lands at the matching gen).
+func (m Model) handleWindowSize(msg tea.WindowSizeMsg) (tea.Model, tea.Cmd) {
+	first := !m.splashShown
+	widthChanged := m.width > 0 && m.width != msg.Width
+	m.width, m.height = msg.Width, msg.Height
+	m.ta.SetWidth(msg.Width - 2)
+	if first || widthChanged {
+		// Glamour compiles a syntax stylesheet + template tree per
+		// build, so only rebuild when the wrap width actually
+		// changes — height-only events and intra-drag duplicates
+		// keep reusing the existing renderer.
+		if r, err := glamour.NewTermRenderer(glamour.WithStandardStyle("dark"),
+			glamour.WithWordWrap(max(msg.Width-4, 1))); err == nil {
+			m.renderer = r
+		}
+	}
+	m.recomputeLayout()
+	if first {
+		m.splashShown = true
+		m.outbox = append(m.outbox, m.splashLines()...)
+		return m, nil
+	}
+	if !widthChanged {
+		return m, nil
+	}
+	m.suppressView = true
+	m.resizeGen++
+	gen := m.resizeGen
+	return m, tea.Tick(resizeSettleDelay, func(time.Time) tea.Msg {
+		return resizeSettleMsg{gen: gen}
+	})
+}
+
+// handleResizeSettle fires once the post-resize debounce expires for the
+// matching gen. Wipes the terminal (so previous-width rows can't soft-wrap
+// into stair-steps), then re-emits splash, replayed scroll, and any pending
+// outbox at the new width. Older debounces self-discard on the gen check.
+func (m Model) handleResizeSettle(msg resizeSettleMsg) (tea.Model, tea.Cmd) {
+	if msg.gen != m.resizeGen {
+		return m, nil
+	}
+	m.suppressView = false
+	// tea.Sequence keeps order strict — Batch would race the clears
+	// with the writes. After the wipe every line below was emitted at
+	// the current width, so no previous-width row can soft-wrap into
+	// stair-steps.
+	cmds := []tea.Cmd{tea.ClearScreen, eraseScrollback}
+	if splash := strings.Join(m.splashLines(), "\n"); splash != "" {
+		cmds = append(cmds, tea.Println(splash))
+	}
+	if scroll := strings.TrimRight(m.scroll.String(), "\n"); scroll != "" {
+		cmds = append(cmds, tea.Println(scroll))
+	}
+	if len(m.outbox) > 0 {
+		cmds = append(cmds, tea.Println(strings.Join(m.outbox, "\n")))
+		m.outbox = nil
+	}
+	return m, tea.Sequence(cmds...)
 }
 
 // submit commits a user prompt. sendText is the expanded form that goes to

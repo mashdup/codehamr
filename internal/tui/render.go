@@ -57,9 +57,7 @@ func (m *Model) flushStreaming() {
 	}
 	// glamour adds a trailing newline; strip once so tea.Println doesn't
 	// double-space the next prompt below the rendered block.
-	rendered = strings.TrimRight(rendered, "\n")
-	m.scroll.WriteString(rendered + "\n")
-	m.outbox = append(m.outbox, rendered)
+	m.appendLine(strings.TrimRight(rendered, "\n"))
 	m.streaming.Reset()
 }
 

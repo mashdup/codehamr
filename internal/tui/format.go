@@ -33,11 +33,23 @@ func compactFloat(f float64) string {
 // because sub-second precision is noise once you're counting minutes.
 // Round values read as `1m` / `1h` rather than `1m 0s` / `1h 0m`.
 func humanDuration(d time.Duration) string {
-	s := d.Seconds()
-	if s < 60 {
-		return fmt.Sprintf("%.1fs", s)
+	secs := d.Seconds()
+	if secs < 60 {
+		return fmt.Sprintf("%.1fs", secs)
 	}
-	return minutesOrHours(int(s))
+	s := int(secs)
+	if s < 3600 {
+		m, rem := s/60, s%60
+		if rem == 0 {
+			return fmt.Sprintf("%dm", m)
+		}
+		return fmt.Sprintf("%dm %ds", m, rem)
+	}
+	h, m := s/3600, (s%3600)/60
+	if m == 0 {
+		return fmt.Sprintf("%dh", h)
+	}
+	return fmt.Sprintf("%dh %dm", h, m)
 }
 
 // humanRate renders a tokens-per-second throughput for the end-of-turn
@@ -57,24 +69,6 @@ func humanRate(tokens int, d time.Duration) string {
 		return fmt.Sprintf("%d tok/s", int(r+0.5))
 	}
 	return fmt.Sprintf("%.1f tok/s", r)
-}
-
-// minutesOrHours formats integer seconds >= 60 as `6m 51s`, `1h 14m`, etc.
-// Drops the trailing sub-unit when it is zero so round values render as
-// `1m` / `1h` rather than `1m 0s` / `1h 0m`.
-func minutesOrHours(s int) string {
-	if s < 3600 {
-		m, rem := s/60, s%60
-		if rem == 0 {
-			return fmt.Sprintf("%dm", m)
-		}
-		return fmt.Sprintf("%dm %ds", m, rem)
-	}
-	h, m := s/3600, (s%3600)/60
-	if m == 0 {
-		return fmt.Sprintf("%dh", h)
-	}
-	return fmt.Sprintf("%dh %dm", h, m)
 }
 
 // backendLabel renders the "am I connected?" signal. Connected is the quiet

@@ -156,13 +156,10 @@ func (s *Session) PreVerify(command string, timeoutSec int) (run bool, timeout t
 	}
 
 	// Clamp timeout to [1s, MaxTimeout]. timeoutSec==0 means default.
-	switch {
-	case timeoutSec <= 0:
+	if timeoutSec <= 0 {
 		timeout = DefaultTimeout
-	case time.Duration(timeoutSec)*time.Second > MaxTimeout:
-		timeout = MaxTimeout
-	default:
-		timeout = time.Duration(timeoutSec) * time.Second
+	} else {
+		timeout = min(time.Duration(timeoutSec)*time.Second, MaxTimeout)
 	}
 
 	// S1: verify cap per loop.
