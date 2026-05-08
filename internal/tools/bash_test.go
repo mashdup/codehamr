@@ -5,6 +5,7 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	chmctx "github.com/codehamr/codehamr/internal/ctx"
 )
@@ -178,5 +179,23 @@ func TestInlineStatusGeneric(t *testing.T) {
 		Arguments: map[string]any{"query": "react useEffect"}})
 	if !strings.HasPrefix(s, "▶ context7: react") {
 		t.Fatalf("bad inline status: %q", s)
+	}
+}
+
+// TestInlineStatusRuneBoundaryTruncate pins down "byte 117 lands inside a
+// multi-byte rune" for a long non-ASCII command. The naive `s[:117]` cuts
+// the leading 'ä' UTF-8 sequence in half, leaving an orphan continuation
+// byte the TUI then tea.Println's to the terminal as invalid UTF-8.
+// Snapping the cut to the previous rune boundary keeps the inline status
+// line a valid UTF-8 string at the cost of a couple characters off the
+// 120-byte budget — well worth it.
+func TestInlineStatusRuneBoundaryTruncate(t *testing.T) {
+	cmd := strings.Repeat("ä", 100) + " end" // 200+ bytes of 2-byte runes
+	s := InlineStatus(chmctx.ToolCall{
+		Name:      "bash",
+		Arguments: map[string]any{"cmd": cmd},
+	})
+	if !utf8.ValidString(s) {
+		t.Fatalf("InlineStatus produced invalid UTF-8 (cut mid-rune): %q", s)
 	}
 }

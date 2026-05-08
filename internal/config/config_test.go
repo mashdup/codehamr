@@ -368,6 +368,31 @@ func TestSetActiveRejectsUnknown(t *testing.T) {
 	}
 }
 
+// TestSetActiveRevertsOnSaveFailure pins down the in-memory/on-disk drift
+// when Save() fails. The naive implementation mutates c.Active first and
+// returns the Save error second, so a subsequent ActiveProfile() reads the
+// wrong endpoint while config.yaml still names the previous profile — on
+// restart Bootstrap reads the file and the user's "switch" silently undoes
+// itself. SetActive must roll back its in-memory mutation when Save fails
+// so the in-memory and on-disk views stay in lockstep.
+func TestSetActiveRevertsOnSaveFailure(t *testing.T) {
+	cfg := &Config{
+		Active: "a",
+		Models: map[string]*Profile{
+			"a": {LLM: "ma"},
+			"b": {LLM: "mb"},
+		},
+		// Dir intentionally empty so Save() fails with "Dir not set".
+	}
+	err := cfg.SetActive("b")
+	if err == nil {
+		t.Fatal("precondition: Save with empty Dir must fail")
+	}
+	if cfg.Active != "a" {
+		t.Fatalf("Active mutated to %q despite Save failure — in-memory state diverges from on-disk", cfg.Active)
+	}
+}
+
 // TestActiveProfileResolvesByName: the helper returns the right struct.
 func TestActiveProfileResolvesByName(t *testing.T) {
 	cfg := &Config{

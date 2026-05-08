@@ -272,11 +272,20 @@ func (c *Config) ModelNames() []string {
 }
 
 // SetActive switches the active profile and persists. Fails if name is
-// unknown — no silent "hope you meant this" coercion.
+// unknown — no silent "hope you meant this" coercion. On Save failure the
+// in-memory Active is reverted so the live model and config.yaml stay in
+// lockstep — otherwise the user's "switch" sticks for the rest of the
+// session but Bootstrap reads the unchanged file on the next start, silently
+// undoing what the user did.
 func (c *Config) SetActive(name string) error {
 	if _, ok := c.Models[name]; !ok {
 		return fmt.Errorf("unknown model: %s", name)
 	}
+	prev := c.Active
 	c.Active = name
-	return c.Save()
+	if err := c.Save(); err != nil {
+		c.Active = prev
+		return err
+	}
+	return nil
 }

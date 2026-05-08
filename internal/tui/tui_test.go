@@ -12,6 +12,7 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
@@ -1235,6 +1236,23 @@ func TestArgIntRejectsNaNAndInf(t *testing.T) {
 	}
 }
 
+// TestVerifyOutcomeLineRuneBoundaryTruncate pins down "byte 157 lands inside
+// a multi-byte rune" for a non-ASCII first line. The naive `snippet[:157]`
+// cuts the leading 'ä' UTF-8 sequence in half on the way out, leaving an
+// orphaned continuation byte that tea.Println dumps to the terminal as
+// invalid UTF-8. Snapping the cut down to the previous rune boundary keeps
+// the output a valid UTF-8 string at the cost of one or two characters less
+// than the byte budget — well worth it for a status line the user reads.
+func TestVerifyOutcomeLineRuneBoundaryTruncate(t *testing.T) {
+	// 'ä' is 2 bytes in UTF-8; 100 of them = 200 bytes well past the 160
+	// byte cut, with the cut deterministically landing inside a sequence.
+	o := gysd.RunOutcome{Output: strings.Repeat("ä", 100) + " end"}
+	line := verifyOutcomeLine(o)
+	if !utf8.ValidString(line) {
+		t.Fatalf("verifyOutcomeLine produced invalid UTF-8 (cut mid-rune): %q", line)
+	}
+}
+
 // TestVerifyOutcomeLineStripsANSI: pytest, cargo, go test, grep —
 // everything that lights up an ANSI-friendly terminal — emits CSI colour
 // codes on every line. The live outcome banner truncates the first line at
@@ -1262,6 +1280,28 @@ func TestVerifyOutcomeLineStripsANSI(t *testing.T) {
 	got = verifyOutcomeLine(gysd.RunOutcome{Output: long, ExitCode: 1})
 	if strings.ContainsRune(got, 0x1b) {
 		t.Fatalf("trailing partial CSI leaked through truncation: %q", got)
+	}
+}
+
+// TestArgIntClampsAtMaxIntBoundary pins down the singular float64 value
+// that slipped past the `n > math.MaxInt` guard. `float64(math.MaxInt64)`
+// rounds *up* to 2^63 because float64 has only 53 mantissa bits, so
+// `n > math.MaxInt` is false at exactly this value (n equals the rounded
+// constant). The next operation, `int(n)`, then converts 2^63 to int64
+// where it overflows — on amd64 the result is MinInt64, which downstream
+// flips PreVerify's `if timeoutSec > 0` gate off and the model lands at
+// the silent default instead of MaxTimeout. The fix uses `>=` so the
+// boundary value lands at MaxInt where it belongs. Probability of a
+// model emitting precisely 9.2233720368547758e+18 is near zero, but the
+// silent overflow is exactly the regression argInt was supposed to catch.
+func TestArgIntClampsAtMaxIntBoundary(t *testing.T) {
+	boundary := float64(math.MaxInt)
+	got := argInt(map[string]any{"timeout_seconds": boundary}, "timeout_seconds")
+	if got <= 0 {
+		t.Fatalf("argInt(float64(MaxInt))=%d — boundary value overflowed int conversion", got)
+	}
+	if got != math.MaxInt {
+		t.Fatalf("argInt(float64(MaxInt))=%d, want MaxInt=%d", got, math.MaxInt)
 	}
 }
 

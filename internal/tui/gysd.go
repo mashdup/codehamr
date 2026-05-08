@@ -6,6 +6,7 @@ import (
 	"math"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	tea "github.com/charmbracelet/bubbletea"
 
@@ -187,7 +188,15 @@ func verifyOutcomeLine(o gysd.RunOutcome) string {
 		return fmt.Sprintf("  %s (no output, exit %d)", icon, o.ExitCode)
 	}
 	if len(snippet) > 160 {
-		snippet = snippet[:157] + "..."
+		// Snap the byte cut down to the previous rune boundary; otherwise
+		// a non-ASCII first line (umlauts, box-drawing, emoji) would be
+		// sliced mid-sequence and tea.Println would dump invalid UTF-8 to
+		// the user's terminal.
+		cut := 157
+		for cut > 0 && !utf8.RuneStart(snippet[cut]) {
+			cut--
+		}
+		snippet = snippet[:cut] + "..."
 	}
 	return fmt.Sprintf("  %s %s", icon, snippet)
 }
@@ -222,6 +231,14 @@ func firstNonBlankLine(s string) string {
 // 60s default instead of clamping the request to MaxTimeout. A model that
 // asks for the maximum timeout must land at MaxTimeout, not at
 // `default-because-overflow`.
+//
+// The clamp uses `>=` rather than `>`: float64 has only 53 mantissa bits,
+// so `float64(math.MaxInt64)` rounds *up* to 2^63 (one above the int64
+// max). With strict `>`, a model that emits exactly the rounded value
+// would slip past the gate and `int(2^63)` would overflow to MinInt64 on
+// amd64 — the same silent-overflow regression in a one-value gap. `>=`
+// catches the singular boundary so every non-finite-int input lands at
+// MaxInt before the conversion.
 func argInt(args map[string]any, name string) int {
 	v, ok := args[name]
 	if !ok {
@@ -232,7 +249,7 @@ func argInt(args map[string]any, name string) int {
 		if n < 0 || math.IsNaN(n) || math.IsInf(n, 0) {
 			return 0
 		}
-		if n > math.MaxInt {
+		if n >= math.MaxInt {
 			return math.MaxInt
 		}
 		return int(n)

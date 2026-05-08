@@ -502,19 +502,15 @@ func (m *Model) startChat() tea.Cmd {
 }
 
 // installTurnContext cancels any in-flight turn context and installs a
-// fresh per-turn root. Returns the new context for callers that need to
-// thread it into background work directly; m.turnCtx and m.cancel hold
-// the same pair. The cancel-old-then-install-new pattern keeps Ctrl+C
-// semantics consistent: one m.cancel() call always unwinds the whole
-// current cascade, whether it was started by submit or a plan nudge.
-func (m *Model) installTurnContext() context.Context {
+// fresh per-turn root on m.turnCtx / m.cancel. The cancel-old-then-
+// install-new pattern keeps Ctrl+C semantics consistent: one m.cancel()
+// call always unwinds the whole current cascade, whether it was started
+// by submit or a plan nudge.
+func (m *Model) installTurnContext() {
 	if m.cancel != nil {
 		m.cancel()
 	}
-	ctx, cancel := context.WithCancel(context.Background())
-	m.turnCtx = ctx
-	m.cancel = cancel
-	return ctx
+	m.turnCtx, m.cancel = context.WithCancel(context.Background())
 }
 
 // beginTurn installs a fresh per-turn context, flips phase to thinking,

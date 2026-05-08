@@ -8,6 +8,7 @@ import (
 	"os/exec"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	chmctx "github.com/codehamr/codehamr/internal/ctx"
 )
@@ -158,7 +159,15 @@ func firstLine(s string) string {
 		s = s[:i]
 	}
 	if len(s) > 120 {
-		s = s[:117] + "..."
+		// Snap the byte cut down to the previous rune boundary; without
+		// this a non-ASCII command (e.g. 'ä' = 2 bytes) would be cut
+		// mid-sequence and the tea.Println'd inline status would carry
+		// invalid UTF-8 to the terminal.
+		cut := 117
+		for cut > 0 && !utf8.RuneStart(s[cut]) {
+			cut--
+		}
+		s = s[:cut] + "..."
 	}
 	return s
 }
