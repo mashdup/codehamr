@@ -229,7 +229,7 @@ func (m *Model) activeContextSize() int {
 // reports a real value. Matches config.defaultContextSize so cloud
 // profiles behave like a fresh local profile until X-Context-Window
 // arrives — which is the very next response.
-const defaultPackFallback = 65536
+const defaultPackFallback = 131072
 
 // resizeSettleDelay debounces width-resize bursts; longer than typical
 // drag SIGWINCH cadence (10–50ms) so a continuous drag collapses to one

@@ -45,7 +45,11 @@ Project specific rules go straight into the chat: tell the agent
 what matters, the conversation carries it.
 
 ```yaml
-# .codehamr/config.yaml
+# codehamr configuration
+#
+# Running codehamr in a devcontainer / WSL2 with Ollama on the host:
+# swap 'http://localhost:11434' with 'http://host.docker.internal:11434' below.
+
 active: local
 models:
     local:

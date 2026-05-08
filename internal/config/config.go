@@ -25,7 +25,12 @@ const DirName = ".codehamr"
 // defaultContextSize is the floor Bootstrap coerces bogus context_size
 // values to. Matches the Default() local profile so a hand-edited config
 // that forgot the field behaves the same as a freshly-bootstrapped one.
-const defaultContextSize = 65536
+// 131072 = 128k tokens, the comfortable spot for the seeded
+// qwen3.6:27b on the README's declared 32GB+ target hardware. The model
+// supports up to 256k native, but doubling the KV cache for the extra
+// 128k would push memory past 32GB; users with bigger machines can lift
+// this per-profile in config.yaml.
+const defaultContextSize = 131072
 
 // cloudProfileNames is the set of managed profiles whose context_size is
 // authoritatively set by the server via the X-Context-Window response
@@ -241,7 +246,20 @@ func writeYAML(path string, v any) error {
 	if err != nil {
 		return err
 	}
-	header := []byte("# codehamr configuration\n\n")
+	// Header is re-prepended on every Save (yaml.Marshal drops free-form
+	// comments), so it's the only place a hint reliably survives. The
+	// sandbox line is the most common first-run footgun: a user runs
+	// codehamr inside a devcontainer or WSL2 while Ollama runs on the
+	// host — `localhost` from inside the sandbox doesn't reach the host,
+	// so they see "connection refused" with no obvious cause. Native
+	// (non-sandboxed) users on any OS aren't affected, hence the
+	// sandbox-vs-host framing rather than an OS-specific one.
+	header := []byte(`# codehamr configuration
+#
+# Running codehamr in a devcontainer / WSL2 with Ollama on the host:
+# swap 'http://localhost:11434' with 'http://host.docker.internal:11434' below.
+
+`)
 	// 0o600 because config.yaml carries the hamrpass key once /hamrpass
 	// activates a profile. World-readable was the prior default and made
 	// the bearer token visible to every local account on the machine.
