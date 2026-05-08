@@ -72,9 +72,9 @@ models:
 
 ## Hardware
 
-codehamr is tuned for the **~27B LLM class**, like **qwen3.6:27b** at 128k context, which needs **32 GB+ unified memory or VRAM**. Ollama desktop users must lift "Context length" in the app settings themselves, otherwise it caps at 4k silently.
+Local LLMs finally caught up, and we love it. For the best experience we recommend the **~30B class** like **qwen3.6:27b** on **32 GB+ unified RAM / VRAM**, fully local and a real alternative to expensive cloud subscriptions.
 
-Bare minimum fallback: the **~9B LLM class**, like **qwen3.5:9b** at 64k on **12 GB+ unified memory or VRAM**. Quality drops noticeably with weaker reasoning, more verify retries, and more loop slips. If neither tier fits your machine, give the optional HamrPass a try, or use your own OpenAI API key.
+Info for Ollama users: Ollama Desktop may silently cut context to 4k. Open settings and lift the **Context length** slider to **64k+**, depending on your RAM / VRAM.
 
 ## Compare
 
