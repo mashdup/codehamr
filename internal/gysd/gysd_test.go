@@ -4,6 +4,7 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 )
 
 // fixedGreen is a multi-line, non-trivial pytest-style output used as
@@ -194,6 +195,28 @@ func TestVerifyOutputCapped(t *testing.T) {
 	}
 	if !strings.Contains(stored, "truncated by GYSD") {
 		t.Fatalf("missing truncation marker in: %s...", stored[:200])
+	}
+}
+
+// TestVerifyOutputCapSnapsToRuneBoundary: a verify output of 3-byte runes
+// (CJK glyphs) crossing the cap must not be sliced mid-sequence by capOutput.
+// Without rune-boundary snapping the stored output carries invalid UTF-8,
+// which (a) breaks evidence substring match (the model quotes the displayed,
+// post-strip form, not the raw bytes), and (b) later fails json.Marshal on
+// the outbound /v1/chat/completions payload — taking the whole turn down.
+func TestVerifyOutputCapSnapsToRuneBoundary(t *testing.T) {
+	// 3-byte rune count chosen so total bytes > MaxOutputBytes and so the
+	// naive HeadTailBytes byte cut lands mid-rune (HeadTailBytes % 3 != 0).
+	in := strings.Repeat("世", MaxOutputBytes/3+10_000)
+	if len(in) <= MaxOutputBytes {
+		t.Fatalf("test input too small (%d <= %d)", len(in), MaxOutputBytes)
+	}
+	out := capOutput(in)
+	if !utf8.ValidString(out) {
+		t.Fatal("capOutput produced invalid UTF-8 — slice landed mid-rune")
+	}
+	if !strings.Contains(out, "truncated by GYSD") {
+		t.Fatal("expected truncation marker")
 	}
 }
 

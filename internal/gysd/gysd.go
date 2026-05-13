@@ -19,6 +19,7 @@ import (
 	"fmt"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	chmctx "github.com/codehamr/codehamr/internal/ctx"
 )
@@ -321,12 +322,24 @@ func (s *Session) Reset() {
 // HeadTailBytes + last HeadTailBytes around a marker. Mirrors the bash-tool
 // output-truncation principle (PROMPT_SYS.md) so the model can re-run
 // a more targeted check if it needs the missing middle.
+//
+// Slice boundaries are snapped to the nearest valid UTF-8 rune start so a
+// non-ASCII payload (CJK glyphs, emoji, …) never gets cut mid-sequence —
+// invalid UTF-8 in VerifyLog would break evidence substring match (model
+// quotes the displayed form) and would later fail json.Marshal on the
+// outbound chat payload, killing the whole turn.
 func capOutput(s string) string {
 	if len(s) <= MaxOutputBytes {
 		return s
 	}
-	head := s[:HeadTailBytes]
-	tail := s[len(s)-HeadTailBytes:]
+	headEnd := HeadTailBytes
+	for headEnd > 0 && !utf8.RuneStart(s[headEnd]) {
+		headEnd--
+	}
+	tailStart := len(s) - HeadTailBytes
+	for tailStart < len(s) && !utf8.RuneStart(s[tailStart]) {
+		tailStart++
+	}
 	marker := fmt.Sprintf("\n[…truncated by GYSD: full output was %d bytes…]\n", len(s))
-	return head + marker + tail
+	return s[:headEnd] + marker + s[tailStart:]
 }

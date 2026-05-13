@@ -878,6 +878,49 @@ func TestStaleProbeForOldProfileDoesNotOverwriteConnectedFlag(t *testing.T) {
 	}
 }
 
+// TestProbeBudgetExhaustedUpdatesStatusBar: a probe that returns 402
+// (budget depleted) carries a BudgetStatus{Set:true, Remaining:0} snapshot
+// alongside the error. handleProbe must apply that snapshot to m.budget so
+// the status bar paints "0% pass" immediately instead of leaving the
+// segment blank until the user's first chat call also 402s.
+func TestProbeBudgetExhaustedUpdatesStatusBar(t *testing.T) {
+	m := newTestModel(t, func(http.ResponseWriter, *http.Request) {})
+	m.cfg.Active = "hamrpass"
+	out, _ := m.handleProbe(probeMsg{
+		profile: "hamrpass",
+		budget:  cloud.BudgetStatus{Set: true, Remaining: 0},
+		silent:  true,
+		err:     cloud.ErrBudgetExhausted,
+	})
+	final := out.(Model)
+	if !final.budget.Set {
+		t.Fatal("402 probe must apply the depleted-budget snapshot to m.budget")
+	}
+	if final.budget.Remaining != 0 {
+		t.Fatalf("budget.Remaining = %v, want 0", final.budget.Remaining)
+	}
+}
+
+// TestProbeBudgetSnapshotIgnoredForStaleProfile: a budget snapshot from a
+// probe that lost the /models race (msg.profile != m.cfg.Active) must not
+// overwrite the live profile's m.budget. Mirrors the stale-probe guard the
+// connected flag already has.
+func TestProbeBudgetSnapshotIgnoredForStaleProfile(t *testing.T) {
+	m := newTestModel(t, func(http.ResponseWriter, *http.Request) {})
+	m.cfg.Active = "local"
+	m.budget = cloud.BudgetStatus{Set: true, Remaining: 0.88}
+	out, _ := m.handleProbe(probeMsg{
+		profile: "hamrpass",
+		budget:  cloud.BudgetStatus{Set: true, Remaining: 0},
+		silent:  true,
+		err:     cloud.ErrBudgetExhausted,
+	})
+	final := out.(Model)
+	if final.budget.Remaining != 0.88 {
+		t.Fatalf("stale probe overwrote live budget: %+v", final.budget)
+	}
+}
+
 // TestActiveContextSizePrefersLiveValue verifies the packing path reads
 // liveContextSize first, falls back to Profile.ContextSize, then to the
 // hardcoded floor. Cloud profiles rely on this ordering: their on-disk

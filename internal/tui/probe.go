@@ -70,6 +70,16 @@ func (m Model) handleProbe(msg probeMsg) (tea.Model, tea.Cmd) {
 	if msg.err != nil {
 		if active {
 			m.connected = false
+			// A 402 probe carries the depleted budget snapshot (Set=true,
+			// Remaining=0) alongside the error. Without this update the
+			// status bar shows no "% pass" segment until the user's first
+			// chat call also 402s — applyError updates the budget there,
+			// but a startup probe to an already-depleted pass would leave
+			// the segment blank in between, which is worse signal than
+			// painting the zero outright.
+			if msg.budget.Set {
+				m.budget = msg.budget
+			}
 		}
 		// Silent startup probes don't print activation banners on success,
 		// so they shouldn't print error banners on failure either —
