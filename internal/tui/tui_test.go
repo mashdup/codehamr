@@ -712,6 +712,24 @@ func TestSlashClearResetsHistory(t *testing.T) {
 	}
 }
 
+// TestSlashClearWipesTerminalScrollback pins the regression for "/clear
+// only wiped the visible viewport, leaving prior conversation lines
+// scrollable above the reset banner". tea.ClearScreen emits \x1b[2J
+// which clears the visible region only — the saved-lines buffer needs
+// the DECSED 3 sequence emitted by eraseScrollback. The handler must
+// return both so the "fresh start" the docstring promises is what the
+// user actually sees.
+func TestSlashClearWipesTerminalScrollback(t *testing.T) {
+	m := newTestModel(t, func(http.ResponseWriter, *http.Request) {})
+	_, cmd := m.runSlash("/clear")
+	if !cmdYieldsClearScreen(cmd) {
+		t.Error("/clear must wipe the visible viewport via tea.ClearScreen")
+	}
+	if !cmdYieldsScrollbackErase(cmd) {
+		t.Error("/clear must also emit eraseScrollback (\\x1b[3J) — otherwise old replies stay scrollable above the reset banner")
+	}
+}
+
 // TestArgPopoverReloadsCfgOnEntry pins the regression for "external edit
 // shows up only on the second /models". The arg popover (cmd→arg
 // transition) builds its suggestion list from m.cfg.Models — without the

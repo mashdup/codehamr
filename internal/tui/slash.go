@@ -233,13 +233,20 @@ func (m Model) cmdClear(_ []string) (tea.Model, tea.Cmd) {
 	m.promptHistory = nil
 	m.histIdx = -1
 	_ = clearPromptHistory(m.cfg.Dir)
-	// tea.ClearScreen wipes the terminal scrollback so the conversation
-	// reset matches what the user sees — without it, /clear would only
-	// drop in-memory state while old replies still scrolled above. Pair
-	// to Ctrl+L (which also redraws but keeps scrollback): /clear means
-	// "fresh start", the screen should reflect that.
-	m.appendLine(styleOK.Render("✓ conversation reset"))
-	return m, tea.ClearScreen
+	// /clear is the "fresh start" — pair to Ctrl+L (which also redraws
+	// but keeps scrollback). tea.ClearScreen alone emits \x1b[2J, which
+	// only wipes the visible viewport; the saved-lines buffer (DECSED 3)
+	// also needs eraseScrollback or old replies stay scrollable above the
+	// reset line, defeating the user-facing promise. Wrap the wipe + the
+	// "✓ conversation reset" Println in tea.Sequence so the print can't
+	// race past the clear (a bare tea.Batch dispatches both goroutines
+	// concurrently and the print would sometimes land before the clear,
+	// then get wiped out). scroll keeps the line for the resize replay
+	// path; outbox is cleared because the Sequence owns the print now.
+	line := styleOK.Render("✓ conversation reset")
+	m.scroll.WriteString(line + "\n")
+	m.outbox = nil
+	return m, tea.Sequence(tea.ClearScreen, eraseScrollback, tea.Println(line))
 }
 
 // hamrpassMinKeyLen guards against half-pasted keys. 16 is short enough that
