@@ -21,7 +21,7 @@ verify as proof), or `ask` (yield back to you). No hallucinated success.
 
 ## Install
 
-Linux, macOS:
+Linux, MacOS:
 
 ```bash
 curl -fsSL https://codehamr.com/install.sh | bash
