@@ -26,7 +26,6 @@ type ToolCall struct {
 type Message struct {
 	Role       Role       `json:"role"`
 	Content    string     `json:"content"`
-	Thinking   string     `json:"thinking,omitempty"`
 	ToolCalls  []ToolCall `json:"tool_calls,omitempty"`
 	ToolCallID string     `json:"tool_call_id,omitempty"`
 	ToolName   string     `json:"name,omitempty"`
@@ -36,7 +35,7 @@ type Message struct {
 func Tokens(s string) int { return (len(s) + 3) / 4 }
 
 func (m Message) Tokens() int {
-	n := Tokens(m.Content) + Tokens(m.Thinking)
+	n := Tokens(m.Content)
 	for _, tc := range m.ToolCalls {
 		n += Tokens(tc.Name)
 		for k, v := range tc.Arguments {
@@ -115,10 +114,9 @@ func runeBoundaryUp(out string, i int) int {
 	return i
 }
 
-// PackResult records what Pack did so the caller can show the drop banner.
+// PackResult records what Pack kept: the packed messages and their count.
 type PackResult struct {
 	Messages []Message
-	Dropped  int
 	Kept     int
 }
 
@@ -147,7 +145,6 @@ func Pack(history []Message, budget int) PackResult {
 	kept = dropOrphanTools(kept)
 	return PackResult{
 		Messages: kept,
-		Dropped:  len(history) - len(kept),
 		Kept:     len(kept),
 	}
 }

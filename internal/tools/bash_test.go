@@ -144,6 +144,23 @@ func TestBashBackgroundedChildDoesNotBlock(t *testing.T) {
 	}
 }
 
+// TestBashBackgroundedChildReturnsCleanOutput: a successful command that
+// backgrounds a child holding the stdout/stderr pipes open trips
+// exec.ErrWaitDelay (the shell already exited 0), NOT an exit error. It must
+// come back with its real output and no spurious "(exit: ...)" marker —
+// otherwise every `cmd &` / `server &` usage looks like a failure to the
+// model. Companion to TestBashBackgroundedChildDoesNotBlock, which only
+// asserts we don't block; this asserts the result isn't mislabeled.
+func TestBashBackgroundedChildReturnsCleanOutput(t *testing.T) {
+	out := Bash(context.Background(), "echo done && sleep 3 &", 10*time.Second)
+	if strings.Contains(out, "(exit:") {
+		t.Fatalf("backgrounded-child success mislabeled as failure: %q", out)
+	}
+	if !strings.Contains(out, "done") {
+		t.Fatalf("expected backgrounded command output, got %q", out)
+	}
+}
+
 func TestExecuteBashWrapsResult(t *testing.T) {
 	call := chmctx.ToolCall{
 		ID: "call_1", Name: "bash",

@@ -143,9 +143,9 @@ func isLocalBuild(version string) bool {
 }
 
 // maybeSelfUpdate runs the pre-launch auto-update step. It's a no-op when:
-//   - version is "dev" (the `go run` / `make run` default — updating would
-//     overwrite the temp binary Go just compiled from local sources with an
-//     older release and silently hide unreleased work),
+//   - version is "dev" (the `go run` default — updating would overwrite the
+//     temp binary Go just compiled from local sources with an older release
+//     and silently hide unreleased work),
 //   - version ends with "-dirty" (locally built from an uncommitted tree via
 //     `make install`; same reasoning — respect what the developer just
 //     built),
@@ -162,10 +162,10 @@ func isLocalBuild(version string) bool {
 // to stderr and returns, letting main() proceed with the old binary.
 func maybeSelfUpdate() {
 	// Guard against overwriting a locally-built binary with an older
-	// release. Without this, `make run` (which is `go run`, version=="dev")
-	// would hash its temp `go-build` binary, find it differs from the
-	// published checksum, and silently swap in the last release — hiding
-	// any unreleased local changes behind an "update applied" banner.
+	// release. Without this, `go run` (version=="dev") would hash its temp
+	// `go-build` binary, find it differs from the published checksum, and
+	// silently swap in the last release — hiding any unreleased local
+	// changes behind an "update applied" banner.
 	if isLocalBuild(version) {
 		return
 	}

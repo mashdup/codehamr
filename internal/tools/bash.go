@@ -4,6 +4,7 @@ package tools
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os/exec"
 	"strings"
@@ -64,6 +65,14 @@ func Bash(parent context.Context, command string, timeout time.Duration) string 
 			// Parent cancellation (user Ctrl+C) is a first-class signal —
 			// spell it out rather than leaking "signal: killed" noise.
 			return s + "\n(cancelled)"
+		case errors.Is(err, exec.ErrWaitDelay):
+			// The shell exited 0; err is non-nil only because a backgrounded
+			// child (`cmd &`) still held the stdout/stderr pipes open past
+			// WaitDelay — the very pattern WaitDelay (above) exists to support,
+			// not a command failure. Return the output as-is so it isn't
+			// mislabeled with a spurious (exit: ...). Mirrors gysd.RunCommand's
+			// errors.As-gated exit handling.
+			return s
 		default:
 			// Exit errors surface as part of the output — exactly what the model needs.
 			s += fmt.Sprintf("\n(exit: %v)", err)

@@ -72,9 +72,15 @@ func CloseDebugLog() {
 // textarea, then submit forwards it to the dispatcher) activates the key
 // successfully via runSlash but slips past a literal-space prefix match
 // here, leaking the verbatim key into log.txt.
+//
+// The command-name match is case-folded: a mistyped `/HamrPass <key>` does
+// not activate the key (dispatch is case-sensitive, so it errors out), but
+// submit's redactSlash call would otherwise echo the verbatim token to
+// scrollback, the recall ring, on-disk history, and log.txt — so redaction
+// errs wider than dispatch, which is the safe direction.
 func redactSlash(line string) string {
 	fields := strings.Fields(line)
-	if len(fields) == 0 || fields[0] != "/hamrpass" {
+	if len(fields) == 0 || !strings.EqualFold(fields[0], "/hamrpass") {
 		return line
 	}
 	if len(fields) == 1 {
@@ -96,7 +102,7 @@ func dbgWritef(category, format string, args ...any) {
 }
 
 // dbgWriteMessage records a chmctx.Message in a human readable shape:
-// thinking, content, and tool calls each get their own labeled section.
+// content and tool calls each get their own labeled section.
 // No-op when logging is off, so callers don't need to guard.
 func dbgWriteMessage(category string, msg chmctx.Message) {
 	dbgMu.Lock()
@@ -106,11 +112,6 @@ func dbgWriteMessage(category string, msg chmctx.Message) {
 		return
 	}
 	var b strings.Builder
-	if msg.Thinking != "" {
-		b.WriteString("THINKING:\n")
-		b.WriteString(msg.Thinking)
-		b.WriteString("\n")
-	}
 	if msg.Content != "" {
 		b.WriteString("CONTENT:\n")
 		b.WriteString(msg.Content)

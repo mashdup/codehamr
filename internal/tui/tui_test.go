@@ -613,6 +613,12 @@ func TestRedactSlashHidesHamrpassKey(t *testing.T) {
 		"/hamrpass\nhp_secret_1234567890abcdef":  "/hamrpass <redacted>",
 		"/hamrpass\thp_secret_1234567890abcdef":  "/hamrpass <redacted>",
 		"  /hamrpass hp_secret_1234567890abcdef": "/hamrpass <redacted>",
+		// Case-folded command name: a mistyped /HamrPass does not activate the
+		// key (dispatch is case-sensitive) but submit still routes the line
+		// through redactSlash, so the verbatim token must not survive into
+		// scrollback, the recall ring, on-disk history, or log.txt.
+		"/HamrPass hp_secret_1234567890abcdef": "/hamrpass <redacted>",
+		"/HAMRPASS hp_secret_1234567890abcdef": "/hamrpass <redacted>",
 	}
 	for in, want := range cases {
 		if got := redactSlash(in); got != want {

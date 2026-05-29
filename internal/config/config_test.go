@@ -534,8 +534,6 @@ func TestBootstrapRejectsNilProfile(t *testing.T) {
 	}
 }
 
-// TestURLOverrideDoesNotPersist: a CODEHAMR_URL style override lives in
-// cfg.URLOverride, ActiveURL reflects it, but Save writes only the
 // TestBootstrapRefusesSymlinkedDir is the regression for "co-tenant on a
 // shared host plants .codehamr → /tmp/attacker before the user's first run,
 // and codehamr happily uses it". Bootstrap must Lstat (not Stat) and refuse
@@ -597,6 +595,8 @@ func TestBootstrapRefusesNonDirectoryAtCodehamrPath(t *testing.T) {
 	}
 }
 
+// TestURLOverrideDoesNotPersist: a CODEHAMR_URL style override lives in
+// cfg.URLOverride, ActiveURL reflects it, but Save writes only the
 // on-disk URL so re-bootstrapping without the env var restores the
 // original endpoint.
 func TestURLOverrideDoesNotPersist(t *testing.T) {
