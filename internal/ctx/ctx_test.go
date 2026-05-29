@@ -21,6 +21,24 @@ func TestTokensHeuristic(t *testing.T) {
 	}
 }
 
+// TestMessageTokensCountsToolCallArguments pins the per-tool-call argument
+// accounting in Message.Tokens (ctx.go:41-43). Pack runs on history that
+// holds assistant messages whose ToolCalls carry parsed Arguments (built in
+// llm.toolSlot.resolve), so this map-iteration cost feeds the budget on every
+// tool-using turn — yet no other test populates Arguments. Asserting the
+// delta (rather than an absolute total) keeps it robust to the +8 per-message
+// overhead while still failing loudly if the Arguments loop is ever dropped.
+func TestMessageTokensCountsToolCallArguments(t *testing.T) {
+	base := Message{Role: RoleAssistant, ToolCalls: []ToolCall{{Name: "bash"}}}.Tokens()
+	withArgs := Message{Role: RoleAssistant, ToolCalls: []ToolCall{
+		{Name: "bash", Arguments: map[string]any{"cmd": "echo hello world"}},
+	}}.Tokens()
+	// args add Tokens("cmd")=1 + Tokens(fmt.Sprint("echo hello world"))=4 = 5.
+	if got := withArgs - base; got != 5 {
+		t.Fatalf("argument cost = %d, want 5 (Message.Tokens must account for ToolCall.Arguments)", got)
+	}
+}
+
 func TestTruncateSmallUntouched(t *testing.T) {
 	in := strings.Repeat("x", 20000) // 5000 tokens, under 6k cap
 	if out := Truncate(in); out != in {
@@ -68,8 +86,12 @@ func TestPackNewestFirstWhole(t *testing.T) {
 		{Role: RoleAssistant, Content: big},
 	}
 	r := Pack(history, 2500)
-	if r.Kept < 2 || r.Kept > 3 {
-		t.Fatalf("kept=%d want 2 or 3", r.Kept)
+	// Each message costs Tokens(4000 bytes)+8 = 1008. Budget 2500 keeps the
+	// newest (1008) then msg3 (used 2016 <= 2500) and breaks before msg2
+	// (3024 > 2500): the deterministic answer is exactly 2. The old {2,3}
+	// range tolerated a phantom off-by-one in the `used+cost > budget` break.
+	if r.Kept != 2 {
+		t.Fatalf("kept=%d want exactly 2", r.Kept)
 	}
 	// last message must always be kept
 	if r.Messages[len(r.Messages)-1].Content != big {

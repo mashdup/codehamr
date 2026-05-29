@@ -24,6 +24,22 @@ func TestBashNonZeroExitNotFatal(t *testing.T) {
 	}
 }
 
+// TestBashExactExitMarkerFormat pins the EXACT joined shape of a non-zero
+// exit (bash.go:78): the command's own output, then a single "\n(exit: ...)"
+// marker — no doubled marker, no missing separator. Every other bash test
+// only does strings.Contains("exit"), so a regression that dropped the
+// leading "\n" or duplicated the marker would pass silently even though the
+// model parses these markers. Doubles as the missing proof that real output
+// is preserved alongside the non-zero exit (TestBashNonZeroExitNotFatal uses
+// `false`, which emits nothing).
+func TestBashExactExitMarkerFormat(t *testing.T) {
+	out := Bash(context.Background(), "echo out; exit 3", 5*time.Second)
+	want := "out\n\n(exit: exit status 3)"
+	if out != want {
+		t.Fatalf("exit marker format wrong:\n got %q\nwant %q", out, want)
+	}
+}
+
 func TestBashEmptyCommand(t *testing.T) {
 	if Bash(context.Background(), " ", time.Second) != "(empty command)" {
 		t.Fatal("empty command handling wrong")

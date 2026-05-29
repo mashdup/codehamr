@@ -949,6 +949,116 @@ func TestToolCallRoundTripExecutesBash(t *testing.T) {
 	}
 }
 
+// TestVerifyDoneRoundTripAcceptsRealEvidence drives the crown-jewel GYSD
+// evidence contract end-to-end through the live tui turn loop — the one
+// product behaviour that was previously proven only as gysd units plus tui
+// staleness guards, never stitched together through Model.Update. Turn 1: the
+// model calls `verify`, which runs a REAL subprocess via gysd.RunCommand whose
+// green output is recorded as evidence. Turn 2: the model calls `done` quoting
+// that output; HandleDone matches the >=20-char substring against the green
+// verify and ends the loop. If any link in the chain (dispatchVerify →
+// RunCommand → verifyResultMsg → applyVerifyResult → RecordVerify → HandleDone)
+// were broken, the marker wouldn't reach the evidence pool and `done` would be
+// rejected — so the accepted-summary assertion exercises the whole wiring.
+func TestVerifyDoneRoundTripAcceptsRealEvidence(t *testing.T) {
+	const marker = "VERIFY_PASSED_MARKER_1234" // 25 chars > gysd.MinEvidenceLen (20)
+	turn := 0
+	m := newTestModel(t, func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		turn++
+		switch turn {
+		case 1: // verify a command whose stdout carries the marker
+			fmt.Fprintf(w, "data: %s\n\n", `{"choices":[{"delta":{"tool_calls":[{"index":0,"id":"v1","function":{"name":"verify","arguments":"{\"command\":\"echo `+marker+`\"}"}}]}}]}`)
+			fmt.Fprintf(w, "data: %s\n\n", `{"choices":[{"delta":{},"finish_reason":"tool_calls"}],"usage":{"completion_tokens":3}}`)
+			fmt.Fprint(w, "data: [DONE]\n\n")
+		default: // done, quoting the real verify output as evidence
+			fmt.Fprintf(w, "data: %s\n\n", `{"choices":[{"delta":{"tool_calls":[{"index":0,"id":"d1","function":{"name":"done","arguments":"{\"summary\":\"echoed the marker\",\"evidence\":\"`+marker+`\"}"}}]}}]}`)
+			fmt.Fprintf(w, "data: %s\n\n", `{"choices":[{"delta":{},"finish_reason":"tool_calls"}],"usage":{"completion_tokens":2}}`)
+			fmt.Fprint(w, "data: [DONE]\n\n")
+		}
+	})
+	mm, cmd := m.submit("make it pass", "make it pass", promptEntry{display: "make it pass"})
+	out, _ := drain(mm, cmd)
+	final := out.(Model)
+
+	if turn != 2 {
+		t.Fatalf("expected a verify turn then a done turn, got %d server turns", turn)
+	}
+	scroll := stripANSI(final.scroll.String())
+	// The live verify outcome line proves a REAL subprocess ran and its
+	// stdout reached the UI (verifyOutcomeLine renders the first output line).
+	if !strings.Contains(scroll, marker) {
+		t.Fatalf("verify outcome line (real subprocess output) missing from scroll:\n%s", scroll)
+	}
+	// The accepted-done summary proves HandleDone matched the evidence against
+	// the green verify recorded through the live wiring — the whole point.
+	if !strings.Contains(scroll, "✓ echoed the marker") {
+		t.Fatalf("done was not accepted end-to-end (evidence chain broken):\n%s", scroll)
+	}
+	if final.phase.active() {
+		t.Fatalf("an accepted done must end the turn, phase=%v", final.phase)
+	}
+	// HandleDone calls Session.Reset on acceptance.
+	if len(final.gysd.VerifyLog) != 0 {
+		t.Fatalf("accepted done should Reset the session, VerifyLog=%+v", final.gysd.VerifyLog)
+	}
+}
+
+// TestHandleStreamClosedNudgesOnMissingLoopTool pins the S4 nudge wiring in
+// handleStreamClosed (model.go:776-778): a turn that ends with no pending
+// tool calls and no loop tool ran must bump MissingStreak and re-enter chat
+// with the nudge appended as a user message. grep showed no test reached this
+// branch — only the gysd-unit EnsureLoopTool counter was covered.
+func TestHandleStreamClosedNudgesOnMissingLoopTool(t *testing.T) {
+	m := newTestModel(t, func(http.ResponseWriter, *http.Request) {})
+	m.phase = phaseStreaming
+	m.installTurnContext() // live turnCtx/cancel
+	m.gysd.BeginTurn()     // LoopToolThisTurn=false, no loop tool ran
+	before := len(m.history)
+
+	out, cmd := m.handleStreamClosed()
+	om := out.(Model)
+
+	if om.gysd.MissingStreak != 1 {
+		t.Fatalf("first missing-loop-tool turn must bump MissingStreak to 1, got %d", om.gysd.MissingStreak)
+	}
+	if cmd == nil {
+		t.Fatal("S4 nudge must re-enter chat with a new-turn Cmd")
+	}
+	if len(om.history) != before+1 {
+		t.Fatalf("S4 nudge must append one user message, history grew by %d", len(om.history)-before)
+	}
+	last := om.history[len(om.history)-1]
+	if last.Role != chmctx.RoleUser || !strings.Contains(last.Content, "verify, done, or ask") {
+		t.Fatalf("S4 nudge message wrong: %+v", last)
+	}
+}
+
+// TestHandleStreamClosedYieldsAfterRepeatedMissingLoopTool pins the S5 hard
+// yield through the live loop (model.go:772-775): once MissingStreak reaches
+// MaxMissingStreak the turn ends with a user-facing block instead of nudging
+// again. Complements the S4 nudge test above.
+func TestHandleStreamClosedYieldsAfterRepeatedMissingLoopTool(t *testing.T) {
+	m := newTestModel(t, func(http.ResponseWriter, *http.Request) {})
+	m.phase = phaseStreaming
+	m.installTurnContext()
+	m.gysd.BeginTurn()
+	m.gysd.MissingStreak = gysd.MaxMissingStreak - 1 // next miss trips S5
+
+	out, cmd := m.handleStreamClosed()
+	om := out.(Model)
+
+	if cmd != nil {
+		t.Fatal("S5 must end the turn, not start another (no Cmd)")
+	}
+	if om.phase.active() {
+		t.Fatalf("S5 yield must end the turn, phase=%v", om.phase)
+	}
+	if !strings.Contains(stripANSI(om.scroll.String()), "drifted off the verify/done/ask loop") {
+		t.Fatalf("S5 user block missing from scroll:\n%s", om.scroll.String())
+	}
+}
+
 // runTurn wires a model against handler, submits `text`, drains the resulting
 // command chain, and returns the resulting Model. Shared by the status-bar
 // tests below so neither duplicates the setup. token, when non-empty, is

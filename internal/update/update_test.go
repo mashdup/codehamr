@@ -110,6 +110,50 @@ func TestApplyRejectsChecksumMismatch(t *testing.T) {
 	}
 }
 
+// TestApplyRestoresBinaryWhenPromoteFails is the regression for the single
+// most dangerous Apply failure mode: the running binary is moved aside to
+// execPath+".old", then the promote rename fails — without the restore at
+// update.go:222 the user is left with NO executable at execPath. The promote
+// rename is the one step that can't be made to fail deterministically and
+// root-safely via the filesystem, so we drive it through the promoteRename
+// seam. The restore itself uses the real os.Rename, so this asserts the
+// recovery actually happens: execPath ends up holding the original bytes
+// again, the temp file is cleaned up, and Apply surfaces the error.
+func TestApplyRestoresBinaryWhenPromoteFails(t *testing.T) {
+	asset := platformAsset(t)
+	body := []byte("verified new binary\n")
+	r := newFakeRelease(t, asset, body, hashOf(body))
+	withReleaseURLs(t, r.srv.URL)
+
+	orig := promoteRename
+	promoteRename = func(string, string) error { return fmt.Errorf("simulated promote failure") }
+	t.Cleanup(func() { promoteRename = orig })
+
+	tmpDir := t.TempDir()
+	exec := filepath.Join(tmpDir, "codehamr")
+	const originalBytes = "the original running binary\n"
+	if err := os.WriteFile(exec, []byte(originalBytes), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	err := Apply(context.Background(), exec)
+	if err == nil {
+		t.Fatal("Apply must surface the promote failure")
+	}
+	// The original binary must be restored from .old — not left missing.
+	got, readErr := os.ReadFile(exec)
+	if readErr != nil {
+		t.Fatalf("execPath is gone after a failed promote — user left with no binary: %v", readErr)
+	}
+	if string(got) != originalBytes {
+		t.Fatalf("execPath not restored to the original binary: got %q", got)
+	}
+	// No half-written temp file should leak.
+	if matches, _ := filepath.Glob(filepath.Join(tmpDir, ".codehamr-update-*")); len(matches) != 0 {
+		t.Fatalf("temp file leaked after failed promote: %+v", matches)
+	}
+}
+
 // TestApplyAcceptsMatchingChecksum: positive case — a download whose hash
 // equals the manifest entry promotes the binary into place.
 func TestApplyAcceptsMatchingChecksum(t *testing.T) {

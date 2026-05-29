@@ -271,9 +271,16 @@ func cmdYieldsPrintln(cmd tea.Cmd) bool {
 	return countPrintlnLeaves(cmd) > 0
 }
 
+// printlnMsgType is the concrete message type tea.Println emits, captured
+// from the real constructor instead of matched by its (unexported) type
+// *name*. Matching on the name string would silently degrade to a no-op —
+// returning 0 and passing every resize-ordering assertion while checking
+// nothing — the day Charm renames that internal type on a bubbletea bump.
+// Capturing the type from tea.Println itself can't drift out of sync.
+var printlnMsgType = reflect.TypeOf(tea.Println("probe")())
+
 func countPrintlnLeaves(cmd tea.Cmd) int {
 	return countCmdLeaves(cmd, func(_ tea.Cmd, msg tea.Msg) bool {
-		t := reflect.TypeOf(msg)
-		return t != nil && t.Name() == "printLineMessage"
+		return msg != nil && reflect.TypeOf(msg) == printlnMsgType
 	})
 }

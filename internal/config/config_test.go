@@ -7,6 +7,28 @@ import (
 	"testing"
 )
 
+// TestBootstrapWritesSandboxHintHeader pins the free-form comment header
+// writeYAML re-prepends on every write (config.go:257-262). yaml.Marshal drops
+// comments, so this header is "the only place a hint reliably survives", and
+// the host.docker.internal line is the #1 first-run footgun for devcontainer/
+// WSL2 users. A refactor that switched to plain yaml.Marshal would silently
+// drop it with zero other test failing — this is that guard.
+func TestBootstrapWritesSandboxHintHeader(t *testing.T) {
+	dir := t.TempDir()
+	if _, created, err := Bootstrap(dir); err != nil || !created {
+		t.Fatalf("Bootstrap should create config on first run: created=%v err=%v", created, err)
+	}
+	raw, err := os.ReadFile(filepath.Join(dir, DirName, "config.yaml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{"codehamr configuration", "host.docker.internal"} {
+		if !strings.Contains(string(raw), want) {
+			t.Fatalf("config.yaml header missing %q:\n%s", want, raw)
+		}
+	}
+}
+
 func TestBootstrapCreatesLayout(t *testing.T) {
 	dir := t.TempDir()
 	cfg, created, err := Bootstrap(dir)

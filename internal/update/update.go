@@ -50,6 +50,15 @@ var releaseBase = "https://github.com/codehamr/codehamr/releases/latest/download
 // budget so a silent network can't extend startup.
 const fetchTimeout = 2 * time.Second
 
+// promoteRename indirects the final, dangerous rename in Apply — the one that
+// moves the verified download onto execPath after the running binary has been
+// moved aside to execPath+".old". Same `var`-for-tests pattern as
+// checksumsURL/releaseBase above: production never reassigns it; the only
+// reason it isn't a direct os.Rename call is that the restore-on-failure
+// branch (which leaves the user with no executable if it regresses) is
+// otherwise impossible to drive deterministically and root-safely in a test.
+var promoteRename = os.Rename
+
 // Check compares the local binary's sha256 against the remote asset's
 // recorded hash and reports whether they differ. ctx is honoured so a parent
 // cancel (Ctrl+C during startup) propagates into the HTTP request. Returns
@@ -215,7 +224,7 @@ func Apply(ctx context.Context, execPath string) error {
 	if err := os.Rename(execPath, oldPath); err != nil {
 		return err
 	}
-	if err := os.Rename(tmpPath, execPath); err != nil {
+	if err := promoteRename(tmpPath, execPath); err != nil {
 		// Promote attempt failed after we already moved the running
 		// binary aside — restore it so the caller still has something
 		// to exec, then surface the error.

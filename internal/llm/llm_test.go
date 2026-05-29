@@ -11,6 +11,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/codehamr/codehamr/internal/cloud"
 	chmctx "github.com/codehamr/codehamr/internal/ctx"
@@ -340,6 +341,37 @@ func TestChatReadsUsageTokens(t *testing.T) {
 	}
 	if tokens != 7 {
 		t.Fatalf("expected tokens=7 from usage block, got %d", tokens)
+	}
+}
+
+// TestSendEventUnblocksOnCancel pins the anti-wedge invariant on sendEvent
+// (llm.go:273-280): once the parent context is cancelled, a send to a channel
+// nobody is draining must abort via the <-parent.Done() arm instead of
+// blocking the stream goroutine forever. This is the only path that exercises
+// that arm. The regression — reverting to a plain `out <- e` — would leak the
+// Chat goroutine on Ctrl+C against a full buffer (see the WHY comment on
+// sendEvent and the "Per-turn context cancellation" invariant in CLAUDE.md);
+// under that regression this test's goroutine never returns and the deadline
+// below fires.
+func TestSendEventUnblocksOnCancel(t *testing.T) {
+	out := make(chan Event) // unbuffered, no reader → the send blocks until cancel
+	ctx, cancel := context.WithCancel(context.Background())
+
+	done := make(chan bool, 1)
+	go func() {
+		done <- sendEvent(ctx, out, Event{Kind: EventContent, Content: "nobody is reading me"})
+	}()
+
+	// The send is wedged (no reader on out); cancelling must release it.
+	cancel()
+
+	select {
+	case ok := <-done:
+		if ok {
+			t.Fatal("sendEvent returned true for a send nobody drained; it must report false after cancel")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("sendEvent wedged on an undrained channel after cancel — the anti-wedge <-parent.Done() arm is missing")
 	}
 }
 

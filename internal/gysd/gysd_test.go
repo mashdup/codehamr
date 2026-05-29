@@ -534,6 +534,24 @@ func TestS4MissingLoopTool(t *testing.T) {
 	}
 }
 
+// TestEnsureLoopToolHappyPath pins the S4-OK branch (gysd.go:290-293) hit on
+// every normal successful turn: when a loop tool ran (LoopToolThisTurn=true),
+// EnsureLoopTool must return zero-value and reset MissingStreak — no nudge,
+// no yield. The S4/S5 *failure* paths are covered above; without this the
+// happy branch (the common case) was never exercised.
+func TestEnsureLoopToolHappyPath(t *testing.T) {
+	s := newSession(t)
+	s.MissingStreak = 2  // pretend a prior drift was accumulating
+	s.LoopToolThisTurn = true // ...but a loop tool ran this turn
+	r := s.EnsureLoopTool()
+	if r.Yield || r.ToolPayload != "" {
+		t.Fatalf("a turn that ran a loop tool must be S4-clean (no nudge/yield): %+v", r)
+	}
+	if s.MissingStreak != 0 {
+		t.Fatalf("MissingStreak must reset to 0 when a loop tool ran, got %d", s.MissingStreak)
+	}
+}
+
 func TestS5ConsecutiveMissingYields(t *testing.T) {
 	s := newSession(t)
 	for i := 0; i < MaxMissingStreak-1; i++ {
