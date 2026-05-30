@@ -138,11 +138,25 @@ const (
 	EventReasoning
 )
 
+// streamIdleTimeout bounds how long readSSE waits for the NEXT SSE frame before
+// treating the stream as dead. It is an inter-frame (idle) timeout, not an
+// end-to-end one: a slow-but-alive stream keeps arriving frames — content,
+// reasoning, even blank/keepalive lines — each resetting the watchdog, so only a
+// connection gone silent after 200 OK trips it. 120s clears a local 30B's
+// worst-case prompt prefill before the first token while still ending the
+// "server holds the socket open and sends nothing" hang that Ctrl+C was the only
+// other escape from.
+const streamIdleTimeout = 120 * time.Second
+
 type Client struct {
 	BaseURL string
 	Model   string
 	Token   string // optional; empty = no Authorization header
 	HTTP    *http.Client
+	// IdleTimeout caps the wait for the next SSE frame (see streamIdleTimeout).
+	// A field, not a bare const, only so tests can shorten it; New sets the
+	// default and nothing else writes it.
+	IdleTimeout time.Duration
 	// noReasoningEffort goes true once the server 400s on reasoning for this
 	// model (OpenAI gpt-5.5+ rejects tools + reasoning_effort here, pushing
 	// that combo onto /v1/responses; Ollama rejects it on non-thinking models
@@ -163,10 +177,11 @@ type Client struct {
 // bounded by Go's default Dialer (30s).
 func New(base, model, token string) *Client {
 	return &Client{
-		BaseURL: strings.TrimRight(base, "/"),
-		Model:   model,
-		Token:   token,
-		HTTP:    &http.Client{},
+		BaseURL:     strings.TrimRight(base, "/"),
+		Model:       model,
+		Token:       token,
+		HTTP:        &http.Client{},
+		IdleTimeout: streamIdleTimeout,
 	}
 }
 
@@ -225,10 +240,29 @@ func (c *Client) run(parent context.Context, msgs []chmctx.Message, tools []Tool
 	}
 	defer resp.Body.Close()
 
+	// Idle watchdog: bufio.Scanner.Scan() ignores context, so a server that
+	// stops sending after 200 OK would wedge readSSE forever. Closing the body
+	// from the timer unblocks the in-flight Read; readSSE then returns and we
+	// surface a stall. parent isn't cancelled, so — unlike Ctrl+C — the error
+	// reaches the user. readSSE resets the timer on every frame.
+	idle := c.IdleTimeout
+	if idle <= 0 {
+		idle = streamIdleTimeout
+	}
+	var stalled atomic.Bool
+	watchdog := time.AfterFunc(idle, func() {
+		stalled.Store(true)
+		resp.Body.Close()
+	})
+
 	budget := cloud.FromHeaders(resp.Header)
 	ctxWindow := cloud.ContextWindowFromHeaders(resp.Header)
-	final, tokens, err := readSSE(parent, resp.Body, budget, out)
+	final, tokens, err := readSSE(parent, resp.Body, budget, out, func() { watchdog.Reset(idle) })
+	watchdog.Stop()
 	if err != nil {
+		if stalled.Load() {
+			err = fmt.Errorf("the server stopped sending data (no stream activity for %s)", idle)
+		}
 		sendEvent(parent, out, Event{Kind: EventError, Err: err})
 		return
 	}
@@ -365,7 +399,7 @@ func errorMessageFromBody(b []byte) string {
 // message (content + accumulated tool calls), the server token count, and any
 // scanner error. parent is threaded through so sends abort on cancellation
 // instead of blocking on an undrained buffer.
-func readSSE(parent context.Context, body io.Reader, budget cloud.BudgetStatus, out chan<- Event) (*chmctx.Message, int, error) {
+func readSSE(parent context.Context, body io.Reader, budget cloud.BudgetStatus, out chan<- Event, onFrame func()) (*chmctx.Message, int, error) {
 	scanner := bufio.NewScanner(body)
 	scanner.Buffer(make([]byte, 1<<16), 4<<20)
 
@@ -377,6 +411,9 @@ func readSSE(parent context.Context, body io.Reader, budget cloud.BudgetStatus, 
 	)
 
 	for scanner.Scan() {
+		// Any line — data, blank separator, or ": keepalive" comment — is
+		// liveness; reset the idle watchdog before inspecting it.
+		onFrame()
 		line := bytes.TrimSpace(scanner.Bytes())
 		if len(line) == 0 || !bytes.HasPrefix(line, []byte("data:")) {
 			continue

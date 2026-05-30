@@ -217,3 +217,27 @@ func TestInlineStatusRuneBoundaryTruncate(t *testing.T) {
 		t.Fatalf("InlineStatus produced invalid UTF-8 (cut mid-rune): %q", s)
 	}
 }
+
+// TestRunRawSurfacesTruncatedToolArgs: the _parse_error sentinel (set by
+// llm.resolve when the server truncates an oversized tool call mid-JSON) must
+// surface as an actionable message naming the cause + chunked recovery — not
+// fall through the type assertions to a misleading "(empty path)" / "(empty
+// command)". Checked for a file tool and bash to pin that the guard is generic,
+// sitting before the per-tool switch.
+func TestRunRawSurfacesTruncatedToolArgs(t *testing.T) {
+	for _, name := range []string{WriteFileName, BashName} {
+		call := chmctx.ToolCall{
+			Name:      name,
+			Arguments: map[string]any{"_parse_error": "unexpected end of JSON input"},
+		}
+		got := runRaw(context.Background(), call)
+		if strings.Contains(got, "empty path") || strings.Contains(got, "empty command") {
+			t.Fatalf("%s: truncation masked as empty-arg error: %q", name, got)
+		}
+		for _, want := range []string{"not valid JSON", "truncated", "cat >>", "wc -c"} {
+			if !strings.Contains(got, want) {
+				t.Fatalf("%s: message missing %q: %q", name, want, got)
+			}
+		}
+	}
+}

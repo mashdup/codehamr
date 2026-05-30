@@ -678,3 +678,95 @@ func TestNewHasNoHTTPTimeout(t *testing.T) {
 		t.Fatalf("http.Client.Timeout must be 0 so per-turn context governs SSE lifetime; got %v", c.HTTP.Timeout)
 	}
 }
+
+// TestChatIdleTimeoutAbortsStalledStream reproduces the exact hang: the server
+// returns 200 OK then sends nothing. Without the idle watchdog scanner.Scan()
+// blocks forever; with it, the body is closed and the turn ends in an EventError
+// naming the stall — a finite escape that doesn't need Ctrl+C.
+func TestChatIdleTimeoutAbortsStalledStream(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(200)
+		w.(http.Flusher).Flush() // headers out so Client.Do returns; then go silent
+		<-r.Context().Done()     // hang until the client gives up and closes the body
+	}))
+	defer srv.Close()
+
+	c := New(srv.URL, "m", "")
+	c.IdleTimeout = 60 * time.Millisecond
+
+	start := time.Now()
+	var gotErr error
+	for _, e := range collect(c.Chat(context.Background(), nil, nil)) {
+		if e.Kind == EventError {
+			gotErr = e.Err
+		}
+	}
+	if gotErr == nil {
+		t.Fatal("expected an EventError from the idle watchdog")
+	}
+	if !strings.Contains(gotErr.Error(), "stopped sending") {
+		t.Fatalf("error should name the stall: %v", gotErr)
+	}
+	if elapsed := time.Since(start); elapsed > 2*time.Second {
+		t.Fatalf("watchdog fired too late (%v) — should be ~IdleTimeout", elapsed)
+	}
+}
+
+// TestChatIdleWatchdogResetByFrames pins that an alive-but-slow stream is NOT
+// aborted: frames spaced under the idle window each reset the watchdog, so a
+// stream whose total span exceeds one window still completes. Guards against a
+// regression where onFrame() stops resetting the timer.
+func TestChatIdleWatchdogResetByFrames(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		flush := w.(http.Flusher)
+		for _, c := range []string{
+			`{"choices":[{"delta":{"content":"A"}}]}`,
+			`{"choices":[{"delta":{"content":"B"}}]}`,
+		} {
+			fmt.Fprintf(w, "data: %s\n\n", c)
+			flush.Flush()
+			time.Sleep(250 * time.Millisecond) // < IdleTimeout, so the watchdog resets
+		}
+		fmt.Fprint(w, "data: [DONE]\n\n")
+		flush.Flush()
+	}))
+	defer srv.Close()
+
+	c := New(srv.URL, "m", "")
+	c.IdleTimeout = 400 * time.Millisecond // > each 250ms gap, < ~500ms total span
+
+	var content strings.Builder
+	for _, e := range collect(c.Chat(context.Background(), nil, nil)) {
+		switch e.Kind {
+		case EventContent:
+			content.WriteString(e.Content)
+		case EventError:
+			t.Fatalf("watchdog aborted a live stream: %v", e.Err)
+		}
+	}
+	if content.String() != "AB" {
+		t.Fatalf("content = %q, want AB (slow-but-alive stream must complete)", content.String())
+	}
+}
+
+// TestToWireParseErrorArgsStayValidJSON: when resolve() stamps _parse_error for a
+// truncated tool call and that assistant message round-trips into the next
+// request, toWire must still emit VALID JSON for arguments — otherwise every
+// later turn re-sends corrupt JSON and the backend 400s forever (session
+// poisoning). The protection is re-marshalling the parsed map, never raw bytes.
+func TestToWireParseErrorArgsStayValidJSON(t *testing.T) {
+	msgs := []chmctx.Message{{
+		Role: chmctx.RoleAssistant,
+		ToolCalls: []chmctx.ToolCall{{
+			ID:        "c1",
+			Name:      "write_file",
+			Arguments: map[string]any{"_parse_error": "unexpected end of JSON input"},
+		}},
+	}}
+	args := toWire(msgs)[0].ToolCalls[0].Function.Arguments
+	if !json.Valid([]byte(args)) {
+		t.Fatalf("arguments must stay valid JSON to avoid poisoning the session: %q", args)
+	}
+}

@@ -115,6 +115,20 @@ func Execute(parent context.Context, call chmctx.ToolCall) chmctx.Message {
 }
 
 func runRaw(parent context.Context, call chmctx.ToolCall) string {
+	// A truncated/oversized tool call leaves llm.resolve()'s _parse_error
+	// sentinel where real args should be. Without this guard the call falls
+	// through to an empty path/cmd and returns a misleading "(empty path)",
+	// hiding that the server cut the arguments at its output-token limit — the
+	// failure that makes a model re-emit the same too-large write for minutes.
+	// Name the real cause and the recovery so it self-corrects in one step.
+	if msg, ok := call.Arguments["_parse_error"].(string); ok {
+		return fmt.Sprintf("(tool arguments were not valid JSON: %s — most likely the "+
+			"content was too large and the server truncated the call at its output-token "+
+			"limit. Do NOT retry the same whole-file write. Build the file in chunks with "+
+			"bash heredoc append: `cat > path <<'EOF'` … `EOF` for the first part, then "+
+			"repeated `cat >> path <<'EOF'` … `EOF` for each next part, then verify with "+
+			"`wc -c path`.)", msg)
+	}
 	switch call.Name {
 	case BashName:
 		cmd, _ := call.Arguments["cmd"].(string)
