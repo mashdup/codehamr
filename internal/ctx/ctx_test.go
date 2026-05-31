@@ -168,6 +168,72 @@ func TestPackKeepsPairedToolMessage(t *testing.T) {
 	}
 }
 
+// TestPackKeepsNewestToolPairOverBudget: when the newest message is a tool
+// result and its owning assistant won't fit the budget, Pack must keep the pair
+// whole rather than drop the lone orphan and collapse to nothing — otherwise the
+// next request carries only the system prompt and silently loses the whole
+// conversation. Reachable on small-ctx profiles after a big tool output.
+func TestPackKeepsNewestToolPairOverBudget(t *testing.T) {
+	bigArgs := strings.Repeat("x", 4*5000) // ~5000-token write_file content
+	history := []Message{
+		{Role: RoleUser, Content: "do the thing"},
+		{Role: RoleAssistant, ToolCalls: []ToolCall{
+			{ID: "c1", Name: "write_file", Arguments: map[string]any{"content": bigArgs}},
+		}},
+		{Role: RoleTool, ToolCallID: "c1", Content: "wrote 20000 bytes"},
+	}
+	r := Pack(history, 500) // far below the assistant's cost
+	if r.Kept == 0 {
+		t.Fatal("Pack collapsed to zero messages — newest tool pair was dropped")
+	}
+	var sawAssistant, sawTool bool
+	for _, m := range r.Messages {
+		if m.Role == RoleAssistant && len(m.ToolCalls) > 0 {
+			sawAssistant = true
+		}
+		if m.Role == RoleTool {
+			sawTool = true
+		}
+	}
+	if !sawAssistant || !sawTool {
+		t.Fatalf("expected the assistant+tool pair to survive, got %+v", r.Messages)
+	}
+}
+
+// TestPackKeepsNewestParallelToolGroupOverBudget: with parallel tool calls the
+// tail is [assistant(c1,c2), tool(c1), tool(c2)], so the newest tool's owner is
+// not the immediately-preceding message. Pack must recover the whole group, and
+// no tool may survive without the assistant that issued its id.
+func TestPackKeepsNewestParallelToolGroupOverBudget(t *testing.T) {
+	bigArgs := strings.Repeat("y", 4*5000)
+	history := []Message{
+		{Role: RoleUser, Content: "do two things"},
+		{Role: RoleAssistant, ToolCalls: []ToolCall{
+			{ID: "c1", Name: "bash", Arguments: map[string]any{"cmd": bigArgs}},
+			{ID: "c2", Name: "bash"},
+		}},
+		{Role: RoleTool, ToolCallID: "c1", Content: "out1"},
+		{Role: RoleTool, ToolCallID: "c2", Content: "out2"},
+	}
+	r := Pack(history, 300)
+	if r.Kept == 0 {
+		t.Fatal("Pack collapsed to zero messages — parallel tool group was dropped")
+	}
+	ids := map[string]bool{}
+	for _, m := range r.Messages {
+		if m.Role == RoleAssistant {
+			for _, tc := range m.ToolCalls {
+				ids[tc.ID] = true
+			}
+		}
+	}
+	for _, m := range r.Messages {
+		if m.Role == RoleTool && !ids[m.ToolCallID] {
+			t.Fatalf("orphan tool %q survived without its assistant: %+v", m.ToolCallID, r.Messages)
+		}
+	}
+}
+
 func TestBudget(t *testing.T) {
 	// Reference the constants directly so a future FixedSystem/FixedTools tweak
 	// doesn't trip a magic-number mismatch absent a real regression.

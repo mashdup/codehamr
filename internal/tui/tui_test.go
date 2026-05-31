@@ -1753,7 +1753,7 @@ func countSystem(history []chmctx.Message) int {
 
 // TestRunawayNudgeFiresOnceAtMaxToolRounds: the per-turn tool-call counter trips
 // exactly one soft system note when it reaches maxToolRounds, and never before
-// or after — equality, not >=, so a long turn can't double-fire it.
+// or after — a once-per-turn latch keeps a long turn from double-firing it.
 func TestRunawayNudgeFiresOnceAtMaxToolRounds(t *testing.T) {
 	m := newTestModel(t, func(http.ResponseWriter, *http.Request) {})
 
@@ -1777,6 +1777,28 @@ func TestRunawayNudgeFiresOnceAtMaxToolRounds(t *testing.T) {
 	m.maybeRunawayNudge()
 	if n := countSystem(m.history); n != 1 {
 		t.Fatalf("past the cap must not re-fire, got %d system notes", n)
+	}
+}
+
+// TestRunawayNudgeFiresWhenCounterSkipsCap: a multi-tool-call round increments
+// toolRounds per call but the nudge is consulted only when the pending queue
+// drains, so the counter can jump from below maxToolRounds to above it without
+// ever landing on it. The latch (not a bare equality test) must still fire the
+// nudge exactly once when the cap is overshot.
+func TestRunawayNudgeFiresWhenCounterSkipsCap(t *testing.T) {
+	m := newTestModel(t, func(http.ResponseWriter, *http.Request) {})
+
+	// Counter overshoots the cap without ever equaling it (the multi-call jump).
+	m.toolRounds = maxToolRounds + 3
+	m.maybeRunawayNudge()
+	if n := countSystem(m.history); n != 1 {
+		t.Fatalf("overshooting the cap must still fire once, got %d system notes", n)
+	}
+	// A later drain in the same turn must not re-fire.
+	m.toolRounds = maxToolRounds + 10
+	m.maybeRunawayNudge()
+	if n := countSystem(m.history); n != 1 {
+		t.Fatalf("latch must prevent a second nudge in the same turn, got %d", n)
 	}
 }
 

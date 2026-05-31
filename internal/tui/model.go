@@ -169,7 +169,11 @@ type Model struct {
 	// open. toolRounds counts tool calls dispatched this turn (reset in endTurn);
 	// at maxToolRounds one soft system note asks the model to self-assess. A
 	// nudge, never a hard yield — same contract as maybeFailureNudge.
-	toolRounds int
+	// runawayNudged latches the nudge to once per turn: a multi-tool-call round
+	// can step toolRounds past maxToolRounds between drain-time checks, so a bare
+	// equality test could skip the threshold entirely.
+	toolRounds    int
+	runawayNudged bool
 
 	// liveContextSize is the per-profile, runtime-only context window the
 	// server reports via X-Context-Window. Seeded by Probe at activation and
@@ -384,8 +388,8 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// drop, the orphan tool message gets appended to the live turn's history
 		// (no preceding assistant.tool_calls → the next /v1 request 400s) and
 		// startChat would abandon the in-flight stream. The turnCtx tag was
-		// captured at runToolCall / syntheticToolResult time; endTurn nils
-		// m.turnCtx and a fresh beginTurn installs a new one that can't match.
+		// captured at runToolCall time; endTurn nils m.turnCtx and a fresh
+		// beginTurn installs a new one that can't match.
 		if msg.turnCtx != m.turnCtx {
 			return m, nil
 		}
@@ -574,6 +578,7 @@ func (m *Model) endTurn() {
 	m.turnCtx = nil
 	m.pending = nil
 	m.toolRounds = 0
+	m.runawayNudged = false
 }
 
 func (m *Model) buildMessages() []chmctx.Message {
@@ -912,15 +917,18 @@ func (m *Model) maybeFailureNudge() {
 const maxToolRounds = 120
 
 // maybeRunawayNudge appends one soft system note when a turn crosses
-// maxToolRounds tool calls without finishing. Equality (not >=) so it fires
-// exactly once per turn; toolRounds keeps climbing afterward. Framed as a
-// self-check, not a stop order — telling a 30B to "stop" mid-task is the
-// premature-completion failure we otherwise fight, so the model decides whether
-// it is still converging.
+// maxToolRounds tool calls without finishing. The runawayNudged latch fires it
+// exactly once per turn: this is consulted only when the pending queue drains,
+// but toolRounds increments per call, so a multi-tool-call round can jump the
+// counter past maxToolRounds between checks — a bare equality test would skip
+// the threshold and never fire. Framed as a self-check, not a stop order —
+// telling a 30B to "stop" mid-task is the premature-completion failure we
+// otherwise fight, so the model decides whether it is still converging.
 func (m *Model) maybeRunawayNudge() {
-	if m.toolRounds != maxToolRounds {
+	if m.runawayNudged || m.toolRounds < maxToolRounds {
 		return
 	}
+	m.runawayNudged = true
 	dbgWritef("nudge", "runaway-iteration nudge injected at %d tool calls this turn", m.toolRounds)
 	m.history = append(m.history, chmctx.Message{
 		Role: chmctx.RoleSystem,

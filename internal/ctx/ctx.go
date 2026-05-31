@@ -133,10 +133,69 @@ func Pack(history []Message, budget int) PackResult {
 	}
 	slices.Reverse(kept)
 	kept = dropOrphanTools(kept)
+	// dropOrphanTools can empty the kept set when the newest message is a tool
+	// result whose owning assistant fell just past the budget cut: the always-
+	// keep-newest guard keeps the lone tool, then the orphan drop removes it,
+	// leaving nothing — so the next request would carry only the system prompt
+	// and silently lose the whole conversation mid-turn (reachable on small-ctx
+	// profiles after a big tool output). Recover the newest assistant+tool-results
+	// group whole, over budget if need be — the same deliberately-over-budget
+	// guarantee a newest user message already gets.
+	if len(kept) == 0 {
+		kept = newestToolGroup(history)
+	}
 	return PackResult{
 		Messages: kept,
 		Kept:     len(kept),
 	}
+}
+
+// newestToolGroup returns the assistant that issued the newest tool result
+// together with every tool result answering it, chronologically — the minimal
+// well-formed unit that honours "always keep the newest" when the newest
+// history message is a tool result. nil when the newest message isn't an
+// identifiable tool result (the budget walk already keeps non-tool newests) or
+// no owning assistant exists (an unpairable tool can't be kept anyway).
+func newestToolGroup(history []Message) []Message {
+	if len(history) == 0 {
+		return nil
+	}
+	last := history[len(history)-1]
+	if last.Role != RoleTool || last.ToolCallID == "" {
+		return nil
+	}
+	owner := -1
+search:
+	for i := len(history) - 2; i >= 0; i-- {
+		if history[i].Role != RoleAssistant {
+			continue
+		}
+		for _, tc := range history[i].ToolCalls {
+			if tc.ID == last.ToolCallID {
+				owner = i
+				break search
+			}
+		}
+	}
+	if owner < 0 {
+		return nil
+	}
+	// Parallel tool calls put [assistant(c1,c2), tool(c1), tool(c2)] at the tail,
+	// so collect every tool result whose id the owning assistant issued — not
+	// just the immediately-preceding one.
+	ids := map[string]bool{}
+	for _, tc := range history[owner].ToolCalls {
+		if tc.ID != "" {
+			ids[tc.ID] = true
+		}
+	}
+	group := []Message{history[owner]}
+	for i := owner + 1; i < len(history); i++ {
+		if history[i].Role == RoleTool && ids[history[i].ToolCallID] {
+			group = append(group, history[i])
+		}
+	}
+	return group
 }
 
 // dropOrphanTools removes tool messages whose tool_call_id has no matching
