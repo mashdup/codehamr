@@ -62,7 +62,7 @@ models:
         llm: qwen3.6:27b
         url: http://localhost:11434
         key: ""
-        context_size: 32768
+        context_size: 256000
     openai:
         llm: gpt-5.5
         url: https://api.openai.com
