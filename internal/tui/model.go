@@ -820,7 +820,7 @@ func (m Model) handleStreamClosed() (tea.Model, tea.Cmd) {
 			dbgWritef("nudge", "empty-reply nudge injected (turn ended with no content and no tool call)")
 			m.history = append(m.history, chmctx.Message{
 				Role:    chmctx.RoleSystem,
-				Content: "Your last turn ended with no reply and no tool call. If you meant to call a tool and it did not run, issue it again now as a proper tool call. If you are still working, continue. If the task is done, check it against the original request — actually run or drive what proves it works — then reply with a one-line summary.",
+				Content: nudgeOrigin + "Your last turn ended with no reply and no tool call. If you meant to call a tool and it did not run, issue it again now as a proper tool call. If you are still working, continue. If the task is done, check it against the original request — actually run or drive what proves it works — then reply with a one-line summary.",
 			})
 			m.phase = phaseThinking
 			return m, m.startChat()
@@ -857,6 +857,21 @@ func newestAssistantEmpty(history []chmctx.Message) bool {
 			continue
 		}
 		return strings.TrimSpace(history[i].Content) == "" && len(history[i].ToolCalls) == 0
+	}
+	return false
+}
+
+// newestAssistantUnverified reports whether the turn's final assistant message
+// already carries an "unverified" marker — the honest self-assessment the finish
+// nudge exists to elicit. Case-insensitive: the model writes "unverified" /
+// "Unverified" interchangeably. Used to suppress the finish nudge on a finish
+// that already named what it couldn't prove (see maybeVerifyNudge).
+func newestAssistantUnverified(history []chmctx.Message) bool {
+	for i := len(history) - 1; i >= 0; i-- {
+		if history[i].Role != chmctx.RoleAssistant {
+			continue
+		}
+		return strings.Contains(strings.ToLower(history[i].Content), "unverified")
 	}
 	return false
 }
@@ -903,6 +918,17 @@ func (m Model) dispatchNextTool() (tea.Model, tea.Cmd) {
 	m.phase = phaseRunning
 	return m, runToolCall(m.turnCtx, call)
 }
+
+// nudgeOrigin prefixes every deterministic backstop note. A weak (30B) model
+// reads a bare mid-turn system message as an empty/absent user turn — "the user
+// hasn't given me a new task, I'll just stop" — the exact misread that turned the
+// finish nudge net-negative on the galaxy run (it re-prompted an honest
+// `unverified` finish into a confident, caveat-free "it works"). Naming the note
+// as codehamr's own automated check, not the user's, keeps the model oriented.
+// Deliberately says nothing about whether to stop or keep going — each nudge body
+// owns that — so it can't induce the premature-completion failure the runaway /
+// verify wording fights.
+const nudgeOrigin = "[Automated codehamr check — not a message from your user.] "
 
 // maxToolFailStreak is how many consecutive same-target failures trigger the
 // nudge. Generous on purpose: a model iterating on a hard edit gets several
@@ -990,8 +1016,8 @@ func (m *Model) maybeFailureNudge() {
 	dbgWritef("nudge", "repeated-failure nudge injected after %d same-target failures (key=%s)", m.failStreak, m.failKey)
 	m.history = append(m.history, chmctx.Message{
 		Role: chmctx.RoleSystem,
-		Content: fmt.Sprintf(
-			"Note: the last %d tool calls to the same target failed the same way. Stop repeating it — read the error, change your approach, or tell the user what's blocking you.",
+		Content: nudgeOrigin + fmt.Sprintf(
+			"The last %d tool calls to the same target failed the same way. Stop repeating it — read the error, change your approach, or tell the user what's blocking you.",
 			m.failStreak),
 	})
 	m.failKey, m.failStreak = "", 0
@@ -1020,8 +1046,8 @@ func (m *Model) maybeRunawayNudge() {
 	dbgWritef("nudge", "runaway-iteration nudge injected at %d tool calls this turn", m.toolRounds)
 	m.history = append(m.history, chmctx.Message{
 		Role: chmctx.RoleSystem,
-		Content: fmt.Sprintf(
-			"Note: %d tool calls so far this turn without finishing. If you're still making real progress, keep going. If you're repeating a step that can't work here — a blocked install, a missing tool, a path failing the same way — stop chasing it (that loop burns the turn); verify another way. If you're stuck or unsure you're converging, tell the user where things stand and what's blocking you.",
+		Content: nudgeOrigin + fmt.Sprintf(
+			"%d tool calls so far this turn without finishing. If you're still making real progress, keep going. If you're repeating a step that can't work here — a blocked install, a missing tool, a path failing the same way — stop chasing it (that loop burns the turn); verify another way. If you're stuck or unsure you're converging, tell the user where things stand and what's blocking you.",
 			m.toolRounds),
 	})
 }
@@ -1047,11 +1073,22 @@ func (m *Model) maybeVerifyNudge() bool {
 	if m.verifyNudged || m.toolRounds < verifyNudgeMinRounds {
 		return false
 	}
+	// The nudge targets the false-green finish — a confident summary for work that
+	// was never run. A finish that already marks something `unverified` has done
+	// exactly the honest self-assessment the nudge would ask for; it is the
+	// OPPOSITE of a false green. Re-prompting it is a wasted round at best, and on
+	// a weak model a regression: the galaxy run's honest "unverified: browser
+	// runtime" got re-prompted into a confident, caveat-free "it works". Let an
+	// honest finish stand. A true false green carries no such marker, so it still
+	// gets nudged.
+	if newestAssistantUnverified(m.history) {
+		return false
+	}
 	m.verifyNudged = true
 	dbgWritef("nudge", "finish re-grounding nudge injected at %d tool calls this turn", m.toolRounds)
 	m.history = append(m.history, chmctx.Message{
 		Role:    chmctx.RoleSystem,
-		Content: "Before you finish: re-read the original request and walk its acceptance criteria one at a time. For each, name the check you actually ran and what it showed. Anything runnable you built or changed is proven only by running it — build or type-check it, run the test, execute the script, or for a page or UI load it in a headless browser and drive the primary interaction (click Start, press the keys, submit the form) and confirm the state changed — then fix what breaks and re-run. If a check genuinely can't run here, mark it `unverified: <what> — <why>` and lead your summary with it, not with a confident \"works\"; never dress up a static check (a brace count, a grep, an HTTP 200) as proof, and never report a check you didn't run. Then reply with your one-line summary.",
+		Content: nudgeOrigin + "Before you finish: re-read the original request and walk its acceptance criteria one at a time. For each, name the check you actually ran and what it showed. Anything runnable you built or changed is proven only by running it — build or type-check it, run the test, execute the script, or for a page or UI load it in a headless browser and drive the primary interaction (click Start, press the keys, submit the form) and confirm the state changed — then fix what breaks and re-run. If a check genuinely can't run here, mark it `unverified: <what> — <why>` and lead your summary with it, not with a confident \"works\"; never dress up a static check (a brace count, a grep, an HTTP 200) as proof, and never report a check you didn't run. Then reply with your one-line summary.",
 	})
 	return true
 }

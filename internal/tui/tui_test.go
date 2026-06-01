@@ -1932,6 +1932,37 @@ func TestVerifyNudgeYieldsToEmptyReply(t *testing.T) {
 	}
 }
 
+// TestVerifyNudgeSkipsHonestUnverifiedFinish: a substantial turn whose summary
+// already marks something `unverified` has done the honest self-assessment the
+// nudge exists to elicit — it is the OPPOSITE of a false green — so it must
+// finish without a re-prompt. Guards the round-5 regression where re-prompting an
+// honest "unverified: browser runtime" finish produced a confident, caveat-free
+// "it works" on the next round.
+func TestVerifyNudgeSkipsHonestUnverifiedFinish(t *testing.T) {
+	m := newTestModel(t, func(http.ResponseWriter, *http.Request) {})
+	m.installTurnContext()
+	m.phase = phaseStreaming
+	m.toolRounds = verifyNudgeMinRounds + 20
+	m.history = []chmctx.Message{
+		{Role: chmctx.RoleUser, Content: "build galaxy.html"},
+		{Role: chmctx.RoleAssistant, Content: "Built galaxy.html. unverified: browser runtime — no browser in this sandbox to load it."},
+	}
+	out, cmd := m.handleStreamClosed()
+	mm := out.(Model)
+	if cmd != nil {
+		t.Fatal("an honest unverified finish must not be re-prompted")
+	}
+	if mm.phase != phaseIdle {
+		t.Fatalf("an honest unverified finish must finalize, got phase %v", mm.phase)
+	}
+	if mm.verifyNudged {
+		t.Fatal("a suppressed nudge must not latch verifyNudged")
+	}
+	if n := countSystem(mm.history); n != 0 {
+		t.Fatalf("an honest unverified finish must not be re-grounded, got %d system notes", n)
+	}
+}
+
 // TestVerifyNudgeEndToEndRePromptsThenFinishes drives a full turn that does real
 // work (8 bash rounds) then "finishes" with a confident summary. The finish
 // re-grounding nudge must inject one note and re-prompt exactly once, and the
