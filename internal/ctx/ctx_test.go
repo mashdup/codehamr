@@ -403,6 +403,60 @@ func TestPackNoStaleAnchorWhenRecentUserSurvives(t *testing.T) {
 	}
 }
 
+// TestPackDemotesSystemNudgeToUser: the four soft-nudge backstops append a
+// system-role note to history. buildMessages prepends the embedded system prompt
+// as wire element 0, so any system message Pack returns reaches the wire as a
+// SECOND, non-leading system message — which strict OpenAI-compat backends reject
+// outright ("System message must be at the beginning"; observed on Qwen3.x via
+// Ollama, also llama.cpp). The only system content in history is a nudge, so Pack
+// must demote it to a user message: the note (automated-check prefix and all)
+// stays in front of the model and the wire stays legal on every backend.
+func TestPackDemotesSystemNudgeToUser(t *testing.T) {
+	history := []Message{
+		{Role: RoleUser, Content: "build it"},
+		{Role: RoleAssistant, Content: "working"},
+		{Role: RoleSystem, Content: "[Automated codehamr check — not a message from your user.] runaway self-check"},
+	}
+	r := Pack(history, 100000)
+	for _, m := range r.Messages {
+		if m.Role == RoleSystem {
+			t.Fatalf("system message survived Pack — would 400 a strict backend: %+v", r.Messages)
+		}
+	}
+	last := r.Messages[len(r.Messages)-1]
+	if last.Role != RoleUser || !strings.Contains(last.Content, "runaway self-check") {
+		t.Fatalf("nudge must be demoted to a user message with its content intact, got %+v", last)
+	}
+}
+
+// TestPackAnchorsTaskEvenWithSystemNudge: a long single turn evicts the sole user
+// task, and a nudge (system) is the newest message. The system→user demotion must
+// run AFTER anchorUserMessage — otherwise the demoted nudge masquerades as a
+// surviving user message, anchorUserMessage no-ops, and the wire loses the
+// original task. The real first user task must still be re-anchored.
+func TestPackAnchorsTaskEvenWithSystemNudge(t *testing.T) {
+	big := strings.Repeat("x", 4*3000)
+	history := []Message{
+		{Role: RoleUser, Content: "BUILD THE GALAXY"},
+		{Role: RoleAssistant, Content: big},
+		{Role: RoleAssistant, Content: big},
+		{Role: RoleSystem, Content: "[Automated codehamr check] runaway self-check"},
+	}
+	r := Pack(history, 5000)
+	var sawTask bool
+	for _, m := range r.Messages {
+		if m.Role == RoleSystem {
+			t.Fatalf("system nudge survived Pack: %+v", r.Messages)
+		}
+		if m.Role == RoleUser && m.Content == "BUILD THE GALAXY" {
+			sawTask = true
+		}
+	}
+	if !sawTask {
+		t.Fatalf("original task must stay anchored even when a nudge is the newest message: %+v", r.Messages)
+	}
+}
+
 func TestBudget(t *testing.T) {
 	// Reference the constants directly so a future FixedSystem/FixedTools/headroom
 	// tweak doesn't trip a magic-number mismatch absent a real regression.

@@ -7,9 +7,5 @@ node_modules/
 **/.codehamr
 **/dist
 **/.claude
-CODEHAMR.md
 CLAUDE.md
-REFACTOR.md
-git-reset.sh
-REFACTOR_STATE.md
 /codehamr

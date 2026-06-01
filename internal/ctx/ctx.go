@@ -132,7 +132,10 @@ type PackResult struct {
 // 400 every OpenAI-compatible backend, so both are stripped before the wire.
 // A final anchorUserMessage pass guarantees the window is never userless — the
 // third shape that 400s every backend, and the one a long single turn reaches
-// when the budget walk evicts the sole user task.
+// when the budget walk evicts the sole user task. demoteSystemMessages then runs
+// last, rewriting any surviving system note to a user message: the wire is always
+// prefixed by the embedded system prompt, so a fourth shape — a second, non-leading
+// system message — 400s strict backends, and that note is only ever a soft-nudge.
 func Pack(history []Message, budget int) PackResult {
 	kept := make([]Message, 0, len(history))
 	used := 0
@@ -170,6 +173,7 @@ func Pack(history []Message, budget int) PackResult {
 		kept = dropOrphanTools(kept)
 	}
 	kept = anchorUserMessage(kept, history)
+	kept = demoteSystemMessages(kept)
 	return PackResult{
 		Messages: kept,
 		Kept:     len(kept),
@@ -196,6 +200,27 @@ func anchorUserMessage(kept, history []Message) []Message {
 	for i := range history {
 		if history[i].Role == RoleUser {
 			return append([]Message{history[i]}, kept...)
+		}
+	}
+	return kept
+}
+
+// demoteSystemMessages rewrites every system-role message in the packed history
+// to a user message. buildMessages always prepends the embedded system prompt as
+// wire element 0, so any system message Pack returns is a SECOND, non-leading
+// system message — which strict OpenAI-compat backends reject outright ("System
+// message must be at the beginning"; observed on Qwen3.x via Ollama, also
+// llama.cpp), the same class of wire-shape 400 the dangling/orphan/userless passes
+// guard against. The only system content reaching history is a soft-nudge note
+// (the embedded prompt is never stored there), so demoting to user keeps that note
+// — automated-check prefix and all — in front of the model while keeping the wire
+// legal everywhere. Must run AFTER anchorUserMessage: a demoted nudge would
+// otherwise masquerade as a surviving user message and suppress the original-task
+// anchor. Mutates only the copied kept slice, never history.
+func demoteSystemMessages(kept []Message) []Message {
+	for i := range kept {
+		if kept[i].Role == RoleSystem {
+			kept[i].Role = RoleUser
 		}
 	}
 	return kept
