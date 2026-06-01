@@ -997,10 +997,12 @@ func (m *Model) maybeFailureNudge() {
 	m.failKey, m.failStreak = "", 0
 }
 
-// maxToolRounds caps tool calls per turn before the runaway nudge fires. Set
-// high on purpose: an honest large task (a wide refactor, a long test-fix loop)
-// can legitimately run dozens of calls, so this only trips on a genuine runaway.
-const maxToolRounds = 120
+// maxToolRounds caps tool calls per turn before the runaway self-check fires.
+// Above an honest large build (the galaxy runs that finished cleanly ran ~60),
+// below a genuine runaway — so a doomed loop the same-target failure streak
+// can't see (a blocked install or lib-hunt re-fired with cosmetic variations)
+// still gets a self-check with budget left, not after it has burned the turn.
+const maxToolRounds = 75
 
 // maybeRunawayNudge appends one soft system note when a turn crosses
 // maxToolRounds tool calls without finishing. The runawayNudged latch fires it
@@ -1019,7 +1021,7 @@ func (m *Model) maybeRunawayNudge() {
 	m.history = append(m.history, chmctx.Message{
 		Role: chmctx.RoleSystem,
 		Content: fmt.Sprintf(
-			"Note: %d tool calls so far this turn without finishing. If you're still making real progress, keep going. If you're repeating steps, stuck, or unsure you're converging, stop and tell the user where things stand and what's blocking you.",
+			"Note: %d tool calls so far this turn without finishing. If you're still making real progress, keep going. If you're repeating a step that can't work here — a blocked install, a missing tool, a path failing the same way — stop chasing it (that loop burns the turn); verify another way. If you're stuck or unsure you're converging, tell the user where things stand and what's blocking you.",
 			m.toolRounds),
 	})
 }
@@ -1049,7 +1051,7 @@ func (m *Model) maybeVerifyNudge() bool {
 	dbgWritef("nudge", "finish re-grounding nudge injected at %d tool calls this turn", m.toolRounds)
 	m.history = append(m.history, chmctx.Message{
 		Role:    chmctx.RoleSystem,
-		Content: "Before you finish: re-read the original request and walk its acceptance criteria one at a time. For each, name the check you actually ran and what it showed. Anything runnable you built or changed is proven only by running it — build or type-check it, run the test, execute the script, or for a page or UI load it in a headless browser and drive the primary interaction (click Start, press the keys, submit the form) and confirm the state changed — then fix what breaks and re-run. If a check genuinely can't run here, mark it `unverified: <what> — <why>`; never dress up a static check (a brace count, a grep, an HTTP 200) as proof, and never report a check you didn't run. Then reply with your one-line summary.",
+		Content: "Before you finish: re-read the original request and walk its acceptance criteria one at a time. For each, name the check you actually ran and what it showed. Anything runnable you built or changed is proven only by running it — build or type-check it, run the test, execute the script, or for a page or UI load it in a headless browser and drive the primary interaction (click Start, press the keys, submit the form) and confirm the state changed — then fix what breaks and re-run. If a check genuinely can't run here, mark it `unverified: <what> — <why>` and lead your summary with it, not with a confident \"works\"; never dress up a static check (a brace count, a grep, an HTTP 200) as proof, and never report a check you didn't run. Then reply with your one-line summary.",
 	})
 	return true
 }
