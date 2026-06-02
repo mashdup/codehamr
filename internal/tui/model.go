@@ -892,7 +892,7 @@ func (m Model) handleStreamClosed() (tea.Model, tea.Cmd) {
 			m.phase = phaseThinking
 			return m, m.startChat()
 		}
-		m.appendLine(styleError.Render("⚠ the model ended its turn with no reply and no tool call — it stopped mid-task, or your model server dropped the call (a thinking model's reasoning parser can swallow it: add vLLM `--reasoning-parser qwen3`, or turn thinking off for tool turns)."))
+		m.appendLine(styleError.Render("⚠ the model ended its turn with no reply and no tool call — it stalled, or your server dropped the call. If thinking is on, its reasoning parser may be swallowing calls — enable one (e.g. vLLM `--reasoning-parser`) or disable thinking for tool turns."))
 		dbgWritef("leak", "turn ended with an empty assistant message after a re-prompt (model stalled or the call was swallowed server-side)")
 		outcome = outcomeStopped
 	} else if w := toolCallLeakWarning(m.history); w != "" {
@@ -951,7 +951,7 @@ func newestAssistantUnverified(history []chmctx.Message) bool {
 // misconfigured/missing server parser leaks the call as content with
 // finish_reason "stop", so the turn ends silently with the tool intent stranded.
 // The bare `<tool_call>` opener covers both shapes the target servers emit: the
-// Qwen3-Coder XML body (`<function=…`) and the general Qwen3-dense JSON body
+// XML body (`<function=…`) and the general JSON body
 // (`{"name":…`) — gating on the literal tag alone catches both while staying
 // specific enough that ordinary prose can't trip it. A message that carried a
 // real structured call never leaked, even if its prose quotes the tag, so a
@@ -967,7 +967,7 @@ func toolCallLeakWarning(history []chmctx.Message) string {
 			return "" // it called a tool properly — the prose tag is incidental
 		}
 		if strings.Contains(history[i].Content, "<tool_call>") {
-			return styleError.Render("⚠ a tool call leaked into the reply as text instead of running — your model server's tool-call parser is misconfigured. Fix it server-side: vLLM `--enable-auto-tool-choice --tool-call-parser qwen3_xml` (prefer `qwen3_xml` over `qwen3_coder`, which can run away on long tool-call inputs); llama.cpp `--jinja` on a current build. If you enabled thinking, the reasoning parser can swallow the call instead — add vLLM `--reasoning-parser qwen3`, or turn thinking off for tool turns.")
+			return styleError.Render("⚠ a tool call leaked into the reply as text instead of running — your model server isn't parsing tool calls. Enable its OpenAI tool-call parser server-side (e.g. vLLM `--tool-call-parser`, llama.cpp `--jinja`).")
 		}
 		return "" // newest assistant message is clean
 	}

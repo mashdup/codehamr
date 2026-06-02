@@ -78,11 +78,11 @@ models:
 
 ## Hardware
 
-Local LLMs finally caught up, and we love it. For the best experience we recommend the **~30B class** like **qwen3.6:27b** on **32 GB+ unified RAM / VRAM**, fully local and a real alternative to expensive cloud subscriptions.
+Local LLMs finally caught up, and we love it. For the best experience we recommend a **~30B-class** model on **32 GB+ unified RAM / VRAM**, fully local and a real alternative to expensive cloud subscriptions.
 
 Info for Ollama users: Ollama's `/v1` endpoint reports no context-window header, so codehamr packs blind to `context_size` in your config. If that exceeds what your server actually honors, the server silently front-truncates the prompt — and codehamr loses its own system prompt and earlier tool results mid-task with no error. Ollama Desktop may silently cap context at 4k: open settings, lift the **Context length** slider to **64k+** (RAM / VRAM permitting), and raise `context_size` in `.codehamr/config.yaml` to match. The seeded default is a safe 32k.
 
-Sampling matters too: qwen3.6:27b wants `temperature 0.6`, `top_p 0.95`, `top_k 20` — **never greedy decoding** (temp 0), which sends it into endless repetition loops. If it still loops, add a small `presence_penalty`. These are server-side knobs (Ollama Modelfile / your endpoint), set them there.
+Sampling matters too: a ~30B-class model typically wants `temperature 0.6`, `top_p 0.95`, `top_k 20` — **never greedy decoding** (temp 0), which sends it into endless repetition loops. If it still loops, add a small `presence_penalty`. These are server-side knobs (Ollama Modelfile / your endpoint), set them there.
 
 ## Compare
 

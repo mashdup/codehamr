@@ -209,8 +209,8 @@ func anchorUserMessage(kept, history []Message) []Message {
 // to a user message. buildMessages always prepends the embedded system prompt as
 // wire element 0, so any system message Pack returns is a SECOND, non-leading
 // system message — which strict OpenAI-compat backends reject outright ("System
-// message must be at the beginning"; observed on Qwen3.x via Ollama, also
-// llama.cpp), the same class of wire-shape 400 the dangling/orphan/userless passes
+// message must be at the beginning"; observed on strict backends like Ollama
+// and llama.cpp), the same class of wire-shape 400 the dangling/orphan/userless passes
 // guard against. The only system content reaching history is a soft-nudge note
 // (the embedded prompt is never stored there), so demoting to user keeps that note
 // — automated-check prefix and all — in front of the model while keeping the wire

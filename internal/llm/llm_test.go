@@ -50,14 +50,14 @@ func TestChatStreamsContent(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	c := New(srv.URL, "qwen3.5:27b", "sk-xyz")
+	c := New(srv.URL, "test-model", "sk-xyz")
 	events := collect(c.Chat(context.Background(),
 		[]chmctx.Message{{Role: chmctx.RoleUser, Content: "hi"}}, nil))
 
 	if gotAuth != "Bearer sk-xyz" {
 		t.Fatalf("auth header missing: %q", gotAuth)
 	}
-	if !strings.Contains(gotBody, `"model":"qwen3.5:27b"`) {
+	if !strings.Contains(gotBody, `"model":"test-model"`) {
 		t.Fatalf("model missing from request: %s", gotBody)
 	}
 	if !strings.Contains(gotBody, `"reasoning_effort":"high"`) {
@@ -510,7 +510,7 @@ func TestChatStructuredErrorPrefersProviderHint(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusTooManyRequests)
-		fmt.Fprint(w, `{"error":{"message":"upstream rate limited","type":"rate_limited","upstream_status":429,"provider_hint":"deepseek is temporarily rate-limited, retry shortly"}}`)
+		fmt.Fprint(w, `{"error":{"message":"upstream rate limited","type":"rate_limited","upstream_status":429,"provider_hint":"the upstream model is temporarily rate-limited, retry shortly"}}`)
 	}))
 	defer srv.Close()
 	evs := collect(New(srv.URL, "m", "").Chat(context.Background(), nil, nil))
@@ -593,7 +593,7 @@ func TestReasoningChunksAreEmitted(t *testing.T) {
 	}
 }
 
-// TestChatFallsBackWhenReasoningEffortRejected: gpt-5.5+ rejects tools +
+// TestChatFallsBackWhenReasoningEffortRejected: newer OpenAI models reject tools +
 // reasoning_effort on /v1/chat/completions with a 400. postChat must drop the
 // field, retry once, and stay sticky for the Client's life — else every turn
 // burns a 400.
@@ -606,7 +606,7 @@ func TestChatFallsBackWhenReasoningEffortRejected(t *testing.T) {
 			w.WriteHeader(400)
 			fmt.Fprintln(w, `{`)
 			fmt.Fprintln(w, `  "error": {`)
-			fmt.Fprintln(w, `    "message": "Function tools with reasoning_effort are not supported for gpt-5.5 in /v1/chat/completions. Please use /v1/responses instead.",`)
+			fmt.Fprintln(w, `    "message": "Function tools with reasoning_effort are not supported for this model in /v1/chat/completions. Please use /v1/responses instead.",`)
 			fmt.Fprintln(w, `    "param": "reasoning_effort"`)
 			fmt.Fprintln(w, `  }`)
 			fmt.Fprintln(w, `}`)
@@ -618,7 +618,7 @@ func TestChatFallsBackWhenReasoningEffortRejected(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	c := New(srv.URL, "gpt-5.5", "")
+	c := New(srv.URL, "cloud-model", "")
 
 	// First turn: 400 → fallback → success.
 	for _, e := range collect(c.Chat(context.Background(), nil, nil)) {
@@ -701,7 +701,7 @@ func TestChatFallsBackWhenOllamaRejectsThinking(t *testing.T) {
 		bodies = append(bodies, string(b))
 		if strings.Contains(string(b), `"reasoning_effort"`) {
 			w.WriteHeader(400)
-			fmt.Fprintln(w, `{"error":"\"qwen3-coder-next:latest\" does not support thinking"}`)
+			fmt.Fprintln(w, `{"error":"\"test-model:latest\" does not support thinking"}`)
 			return
 		}
 		sseOK(w, []string{
@@ -710,7 +710,7 @@ func TestChatFallsBackWhenOllamaRejectsThinking(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	c := New(srv.URL, "qwen3-coder-next:latest", "")
+	c := New(srv.URL, "test-model:latest", "")
 
 	// First turn: 400 → fallback → success.
 	for _, e := range collect(c.Chat(context.Background(), nil, nil)) {

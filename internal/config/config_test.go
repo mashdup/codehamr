@@ -115,7 +115,7 @@ func TestBootstrapDoesNotRestoreDeletedHamrpass(t *testing.T) {
 	yaml := []byte(`active: local
 models:
   local:
-    llm: qwen3.6:27b
+    llm: local-model
     url: http://host.docker.internal:11434
     key: ""
     context_size: 262144
@@ -173,7 +173,7 @@ func TestBootstrapDoesNotRestoreRenamedLocal(t *testing.T) {
 	yaml := []byte(`active: ollama
 models:
   ollama:
-    llm: qwen3.6:27b
+    llm: local-model
     url: http://localhost:11434
     key: ""
     context_size: 65536
@@ -234,7 +234,7 @@ func TestBootstrapPreservesExistingHamrpassKey(t *testing.T) {
 	yaml := []byte(`active: hamrpass
 models:
   local:
-    llm: qwen3.6:27b
+    llm: local-model
     url: http://localhost:11434
     key: ""
     context_size: 65536
@@ -267,12 +267,12 @@ func TestBootstrapLoadsMultipleProfiles(t *testing.T) {
 	yaml := []byte(`active: work
 models:
   home:
-    llm: qwen3.5:27b
+    llm: local-model
     url: http://llm:11434
     key: ""
     context_size: 65536
   work:
-    llm: gpt-5.1
+    llm: cloud-model
     url: https://api.example/v1
     key: sk-abc
     context_size: 200000
@@ -297,7 +297,7 @@ models:
 		}
 	}
 	p := cfg.ActiveProfile()
-	if p.LLM != "gpt-5.1" || p.URL != "https://api.example/v1" || p.Key != "sk-abc" {
+	if p.LLM != "cloud-model" || p.URL != "https://api.example/v1" || p.Key != "sk-abc" {
 		t.Fatalf("active profile wrong: %+v", p)
 	}
 }

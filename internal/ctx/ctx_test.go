@@ -407,8 +407,8 @@ func TestPackNoStaleAnchorWhenRecentUserSurvives(t *testing.T) {
 // system-role note to history. buildMessages prepends the embedded system prompt
 // as wire element 0, so any system message Pack returns reaches the wire as a
 // SECOND, non-leading system message — which strict OpenAI-compat backends reject
-// outright ("System message must be at the beginning"; observed on Qwen3.x via
-// Ollama, also llama.cpp). The only system content in history is a nudge, so Pack
+// outright ("System message must be at the beginning"; observed on strict
+// backends like Ollama and llama.cpp). The only system content in history is a nudge, so Pack
 // must demote it to a user message: the note (automated-check prefix and all)
 // stays in front of the model and the wire stays legal on every backend.
 func TestPackDemotesSystemNudgeToUser(t *testing.T) {
@@ -464,7 +464,7 @@ func TestBudget(t *testing.T) {
 	if raw := 65536 - FixedSystem - FixedTools - 8192; Budget(65536) != raw-raw/budgetHeadroomDivisor {
 		t.Fatalf("budget wrong at 65k: %d", Budget(65536))
 	}
-	// 262k: ctxSize/8 = 32768, matches Qwen3 thinking-mode default.
+	// 262k: ctxSize/8 = 32768, matches a common thinking-mode default.
 	if raw := 262144 - FixedSystem - FixedTools - 32768; Budget(262144) != raw-raw/budgetHeadroomDivisor {
 		t.Fatalf("budget wrong at 262k: %d", Budget(262144))
 	}
@@ -484,7 +484,7 @@ func TestResponseReserveScales(t *testing.T) {
 		{64_000, 8000},    // floor — ctxSize/8 = 8000, not >
 		{65_536, 8192},    // just above the floor
 		{128_000, 16_000}, // linear
-		{262_144, 32_768}, // Qwen3 thinking-mode default
+		{262_144, 32_768}, // common thinking-mode default
 		{1_000_000, 125_000},
 	}
 	for _, c := range cases {

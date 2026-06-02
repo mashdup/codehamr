@@ -101,7 +101,7 @@ type streamDelta struct {
 	Role    string `json:"role,omitempty"`
 	Content string `json:"content,omitempty"`
 	// Reasoning is the incremental chain-of-thought fragment that reasoning
-	// models (Qwen3, o1, ...) stream in `delta.reasoning` before answer
+	// models stream in `delta.reasoning` before answer
 	// tokens. Forwarded as EventReasoning to keep the UI animating, but never
 	// round-trips into the assistant message — it has no place in history.
 	Reasoning string     `json:"reasoning,omitempty"`
@@ -169,9 +169,9 @@ type Client struct {
 	// default and nothing else writes it.
 	IdleTimeout time.Duration
 	// noReasoningEffort goes true once the server 400s on reasoning for this
-	// model (OpenAI gpt-5.5+ rejects tools + reasoning_effort here, pushing
-	// that combo onto /v1/responses; Ollama rejects it on non-thinking models
-	// like qwen3-coder). Sticky for the Client's lifetime so later turns skip
+	// model (newer OpenAI models reject tools + reasoning_effort here, pushing
+	// that combo onto /v1/responses; Ollama rejects it on non-thinking models).
+	// Sticky for the Client's lifetime so later turns skip
 	// to the supported shape; a `/models` switch builds a fresh Client and
 	// resets it, correctly, since the new endpoint may have different rules.
 	//
@@ -230,7 +230,7 @@ func (c *Client) Probe(parent context.Context) (ProbeResult, error) {
 
 // Chat streams an assistant response on the returned channel, closing it when
 // the stream ends. Reasoning runs at `high` effort by default; if the server
-// rejects the tools + reasoning_effort combo (OpenAI's gpt-5.5+ does), postChat
+// rejects the tools + reasoning_effort combo (newer OpenAI models do), postChat
 // drops reasoning_effort for this Client's lifetime so the model still works,
 // with tools but no reasoning. Staying on chat-completions is the product line;
 // we do not branch to /v1/responses to keep reasoning.
@@ -319,7 +319,7 @@ func (c *Client) sendChat(parent context.Context, msgs []chmctx.Message, tools [
 
 // postChat dispatches via doPost; on a 400 rejecting reasoning it drops
 // reasoning_effort for this Client's lifetime and retries once. Two wild
-// flavours, both caught by substring match: OpenAI gpt-5.5+
+// flavours, both caught by substring match: newer OpenAI models
 // ("reasoning_effort … not supported") and Ollama non-thinking models
 // ("<model> does not support thinking"). Each signal is the provider's own
 // phrase — "not support"+"reasoning_effort", or the literal "does not support

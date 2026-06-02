@@ -448,7 +448,7 @@ func TestArgPopoverOpensForModels(t *testing.T) {
 	// content, not config defaults.
 	delete(m.cfg.Models, "hamrpass")
 	m.cfg.Models["remote"] = &config.Profile{
-		LLM: "gpt-5.1", URL: "http://r", Key: "sk-r", ContextSize: 200000,
+		LLM: "cloud-model", URL: "http://r", Key: "sk-r", ContextSize: 200000,
 	}
 	// Persist so the popover's cmd→arg reload reads back the test setup.
 	if err := m.cfg.Save(); err != nil {
@@ -559,7 +559,7 @@ func TestPrintHelpListsAllCommands(t *testing.T) {
 func TestSlashModelSwitchesActive(t *testing.T) {
 	m := newTestModel(t, func(http.ResponseWriter, *http.Request) {})
 	m.cfg.Models["remote"] = &config.Profile{
-		LLM: "gpt-5.1", URL: "http://remote:9000", Key: "sk-r", ContextSize: 200000,
+		LLM: "cloud-model", URL: "http://remote:9000", Key: "sk-r", ContextSize: 200000,
 	}
 	if err := m.cfg.Save(); err != nil {
 		t.Fatal(err)
@@ -572,7 +572,7 @@ func TestSlashModelSwitchesActive(t *testing.T) {
 	if final.cli.BaseURL != "http://remote:9000" {
 		t.Fatalf("client.BaseURL not rebuilt: %q", final.cli.BaseURL)
 	}
-	if final.cli.Model != "gpt-5.1" {
+	if final.cli.Model != "cloud-model" {
 		t.Fatalf("client.Model not rebuilt: %q", final.cli.Model)
 	}
 	if final.cli.Token != "sk-r" {
@@ -727,7 +727,7 @@ func TestVerboseLogCapturesTurnRecords(t *testing.T) {
 func TestSlashModelSwitchDropsStickyFallbackState(t *testing.T) {
 	m := newTestModel(t, func(http.ResponseWriter, *http.Request) {})
 	m.cfg.Models["remote"] = &config.Profile{
-		LLM: "gpt-5.1", URL: "http://remote:9000", Key: "sk-r", ContextSize: 200000,
+		LLM: "cloud-model", URL: "http://remote:9000", Key: "sk-r", ContextSize: 200000,
 	}
 	if err := m.cfg.Save(); err != nil {
 		t.Fatal(err)
@@ -738,7 +738,7 @@ func TestSlashModelSwitchDropsStickyFallbackState(t *testing.T) {
 	if final.cli == before {
 		t.Fatal("rebuildClient must replace the *llm.Client pointer to drop sticky reasoning_effort fallback state")
 	}
-	if final.cli.BaseURL != "http://remote:9000" || final.cli.Model != "gpt-5.1" || final.cli.Token != "sk-r" {
+	if final.cli.BaseURL != "http://remote:9000" || final.cli.Model != "cloud-model" || final.cli.Token != "sk-r" {
 		t.Fatalf("fresh client missing one of the new profile's fields: %+v", final.cli)
 	}
 }
@@ -751,7 +751,7 @@ func TestSlashModelSwitchDropsStickyFallbackState(t *testing.T) {
 func TestSlashModelSwitchClearsStaleBudget(t *testing.T) {
 	m := newTestModel(t, func(http.ResponseWriter, *http.Request) {})
 	m.cfg.Models["local"] = &config.Profile{
-		LLM: "qwen", URL: "http://ollama:11434", Key: "", ContextSize: 32000,
+		LLM: "local-model", URL: "http://ollama:11434", Key: "", ContextSize: 32000,
 	}
 	m.budget = cloud.BudgetStatus{Set: true, Remaining: 0.88}
 	out, _ := m.runSlash("/models local")
@@ -812,12 +812,12 @@ func TestArgPopoverReloadsCfgOnEntry(t *testing.T) {
 	yaml := []byte(`active: local
 models:
   local:
-    llm: qwen3.6:27b
+    llm: local-model
     url: ` + m.cfg.Models["local"].URL + `
     key: ""
     context_size: 131072
   remote:
-    llm: gpt-5.1
+    llm: cloud-model
     url: http://remote:9000
     key: sk-r
     context_size: 200000
@@ -845,12 +845,12 @@ func TestRunSlashPicksUpExternalConfigEdits(t *testing.T) {
 	yaml := []byte(`active: local
 models:
   local:
-    llm: qwen3.6:27b
+    llm: local-model
     url: ` + m.cfg.Models["local"].URL + `
     key: ""
     context_size: 131072
   remote:
-    llm: gpt-5.1
+    llm: cloud-model
     url: http://remote:9000
     key: sk-r
     context_size: 200000
@@ -2074,13 +2074,13 @@ func TestEndTurnResetsVerifyNudged(t *testing.T) {
 	}
 }
 
-// TestToolCallLeakWarningDetectsStrandedXML: a turn ending with Qwen3-Coder
+// TestToolCallLeakWarningDetectsStrandedXML: a turn ending with leaked
 // tool-call XML stranded in the newest assistant message warns the user; clean
 // text doesn't, and only the NEWEST assistant message is inspected.
 func TestToolCallLeakWarningDetectsStrandedXML(t *testing.T) {
-	// Qwen3-Coder XML body.
+	// XML tool-call body.
 	coderLeak := "Let me search.\n<tool_call>\n<function=bash>\n<parameter=cmd>ls</parameter>\n</function>\n</tool_call>"
-	// General Qwen3-dense JSON body — the target model class, NO `<function=`.
+	// General JSON tool-call body — the target model class, NO `<function=`.
 	denseLeak := "Let me search.\n<tool_call>\n{\"name\": \"bash\", \"arguments\": {\"cmd\": \"ls\"}}\n</tool_call>"
 	clean := "Done — built and tested, all green."
 
@@ -3148,7 +3148,7 @@ func TestEmptyReplyNudgeFiresOnceThenSurfaces(t *testing.T) {
 		t.Fatalf("latch must bound re-prompts to one (want 2 requests total, got %d)", round)
 	}
 	scroll := stripANSI(final.scroll.String())
-	if !strings.Contains(scroll, "your model server dropped the call") {
+	if !strings.Contains(scroll, "dropped the call") {
 		t.Fatalf("a persistently-empty turn must surface a diagnostic, not die silently:\n%s", scroll)
 	}
 	if final.phase != phaseIdle {

@@ -99,7 +99,7 @@ func dbgWritef(category, format string, args ...any) {
 }
 
 // dbgWriteSession records the active backend and context budget once at startup.
-// Behaviour differs sharply by model (a dense Qwen3 and qwen3-coder fail in
+// Behaviour differs sharply by model (different model families fail in
 // different ways) and by context window, so a shared log must name exactly what
 // produced it. The system prompt itself isn't dumped — it's the embedded
 // PROMPT_SYS.md plus the working-dir anchor, both reconstructable from the repo;

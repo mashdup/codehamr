@@ -27,7 +27,7 @@ const DirName = ".codehamr"
 // shim reports no X-Context-Window, so codehamr packs to this value blind — set
 // it too high and the server silently front-truncates the prompt, dropping the
 // embedded system prompt and early tool results with no error. 32k is the safe
-// stock-Ollama tier and the seeded qwen3.6:27b's native window. Users who raise
+// stock-Ollama tier and the seeded local model's native window. Users who raise
 // their server's num_ctx (OLLAMA_CONTEXT_LENGTH; see README) lift this to match.
 const defaultContextSize = 32768
 
