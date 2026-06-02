@@ -8,6 +8,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strings"
 	"sync"
 	"testing"
@@ -782,6 +783,37 @@ func TestNewHasNoHTTPTimeout(t *testing.T) {
 	c := New("http://example.test", "model", "token")
 	if c.HTTP.Timeout != 0 {
 		t.Fatalf("http.Client.Timeout must be 0 so per-turn context governs SSE lifetime; got %v", c.HTTP.Timeout)
+	}
+}
+
+// TestIdleTimeoutFromEnv pins the CODEHAMR_IDLE_TIMEOUT contract: a Go duration
+// or bare-seconds string wins, anything else (unset, garbage, non-positive)
+// falls back to the default. The default is deliberately generous because this
+// is a dead-connection detector, not a loop guard.
+func TestIdleTimeoutFromEnv(t *testing.T) {
+	cases := []struct {
+		val  string
+		set  bool
+		want time.Duration
+	}{
+		{set: false, want: streamIdleTimeout},
+		{val: "", set: true, want: streamIdleTimeout},
+		{val: "90m", set: true, want: 90 * time.Minute},
+		{val: "1h30m", set: true, want: 90 * time.Minute},
+		{val: "300", set: true, want: 300 * time.Second},
+		{val: "garbage", set: true, want: streamIdleTimeout},
+		{val: "0", set: true, want: streamIdleTimeout},
+		{val: "-5m", set: true, want: streamIdleTimeout},
+	}
+	for _, tc := range cases {
+		if tc.set {
+			t.Setenv("CODEHAMR_IDLE_TIMEOUT", tc.val)
+		} else {
+			os.Unsetenv("CODEHAMR_IDLE_TIMEOUT")
+		}
+		if got := idleTimeoutFromEnv(); got != tc.want {
+			t.Errorf("idleTimeoutFromEnv(%q, set=%v) = %v, want %v", tc.val, tc.set, got, tc.want)
+		}
 	}
 }
 

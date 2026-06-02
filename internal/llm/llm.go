@@ -23,6 +23,8 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"os"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -153,11 +155,39 @@ const (
 // the pre-first-token gap: a local model emits nothing while it prefills the
 // prompt (or cold-reloads after a keep_alive eviction), and a 27B on modest
 // hardware can stay silent well past two minutes there; a 120s value killed such
-// live streams mid-prefill. 600s clears that worst case; erring long is cheap
-// because a genuinely dead socket is still escapable instantly with Ctrl+C
-// (request-context cancel unblocks the read), whereas killing a live stream loses
-// the turn.
-const streamIdleTimeout = 600 * time.Second
+// live streams mid-prefill. A big-context turn (2nd/3rd prompt on a complex
+// codebase) makes prefill scale with packed-history size, and an
+// OpenAI-compatible server typically streams nothing during it, so even 600s
+// can trip on a still-working model. 1h is the default so a user can walk away;
+// erring long is cheap on two counts. A genuinely dead socket is caught far
+// sooner by OS TCP keepalive (Go's default Dialer probes the peer), independent
+// of this timeout, so a long value means "patient with a live-but-slow stream",
+// not "frozen forever on a dead one". And it stays escapable instantly with
+// Ctrl+C (request-context cancel unblocks the read), whereas killing a live
+// stream loses the turn. This idle timeout is NOT the loop/stuck guard: a
+// looping model emits frames and resets the watchdog every time, so it slips
+// straight past; runaway/failure nudges and Ctrl+C own that. CODEHAMR_IDLE_TIMEOUT
+// overrides the default (Go duration like "90m", or a bare number = seconds).
+const streamIdleTimeout = time.Hour
+
+// idleTimeoutFromEnv resolves CODEHAMR_IDLE_TIMEOUT to a duration, falling back
+// to streamIdleTimeout when unset or unparseable. Accepts a Go duration string
+// ("45m", "1h30m") or a bare number read as seconds. Lives here, not in main's
+// applyEnvOverrides, because it's purely an llm concern and both Client call
+// sites (startup + /models switch) go through New.
+func idleTimeoutFromEnv() time.Duration {
+	v := strings.TrimSpace(os.Getenv("CODEHAMR_IDLE_TIMEOUT"))
+	if v == "" {
+		return streamIdleTimeout
+	}
+	if d, err := time.ParseDuration(v); err == nil && d > 0 {
+		return d
+	}
+	if n, err := strconv.Atoi(v); err == nil && n > 0 {
+		return time.Duration(n) * time.Second
+	}
+	return streamIdleTimeout
+}
 
 type Client struct {
 	BaseURL string
@@ -192,7 +222,7 @@ func New(base, model, token string) *Client {
 		Model:       model,
 		Token:       token,
 		HTTP:        &http.Client{},
-		IdleTimeout: streamIdleTimeout,
+		IdleTimeout: idleTimeoutFromEnv(),
 	}
 }
 

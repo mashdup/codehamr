@@ -113,7 +113,8 @@ Config:
   .codehamr/config.yaml   per-project settings
 
 Env:
-  CODEHAMR_URL         override the active profile's url at runtime`))
+  CODEHAMR_URL            override the active profile's url at runtime
+  CODEHAMR_IDLE_TIMEOUT   stream idle timeout, e.g. 90m or 1h (default 1h)`))
 }
 
 // isLocalBuild reports whether the binary came from a working tree rather
