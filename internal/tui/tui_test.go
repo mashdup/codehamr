@@ -1567,14 +1567,16 @@ func TestLiveElapsed(t *testing.T) {
 		{800 * time.Millisecond, "0s"},
 		{12_300 * time.Millisecond, "12s"},
 		{59_900 * time.Millisecond, "59s"},
-		{60 * time.Second, "1m"},
+		{60 * time.Second, "1m 00s"},
 		{90 * time.Second, "1m 30s"},
 		{411_100 * time.Millisecond, "6m 51s"},
+		{479 * time.Second, "7m 59s"},
+		{480 * time.Second, "8m 00s"},
 		{3599 * time.Second, "59m 59s"},
-		{3600 * time.Second, "1h"},
-		{3660 * time.Second, "1h 1m"},
-		{7200 * time.Second, "2h"},
-		{7500 * time.Second, "2h 5m"},
+		{3600 * time.Second, "1h 00m"},
+		{3660 * time.Second, "1h 01m"},
+		{7200 * time.Second, "2h 00m"},
+		{7500 * time.Second, "2h 05m"},
 	}
 	for _, c := range cases {
 		if got := liveElapsed(c.d); got != c.want {

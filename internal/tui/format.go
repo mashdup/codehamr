@@ -26,25 +26,19 @@ func humanTokens(n int) string {
 
 // liveElapsed renders a running wall-clock duration for the status bar: whole
 // seconds under a minute (no sub-second decimal spinning at the spinner's
-// refresh rate), then `6m 51s` / `1h 14m`. Round values read as `1m` / `1h`,
-// not `1m 0s` / `1h 0m`. Used live (time.Since(turnStart)) and frozen at finish.
+// refresh rate), then `6m 51s` / `1h 14m`. The lower unit is always two digits
+// and round values are NOT collapsed (`8m 00s`, not `8m`), so the readout never
+// jumps from `7m 59s` straight to `8m` and back: it counts up visually steady.
+// Used live (time.Since(turnStart)) and frozen at finish.
 func liveElapsed(d time.Duration) string {
 	s := int(d.Seconds())
 	if s < 60 {
 		return fmt.Sprintf("%ds", s)
 	}
 	if s < 3600 {
-		m, rem := s/60, s%60
-		if rem == 0 {
-			return fmt.Sprintf("%dm", m)
-		}
-		return fmt.Sprintf("%dm %ds", m, rem)
+		return fmt.Sprintf("%dm %02ds", s/60, s%60)
 	}
-	h, m := s/3600, (s%3600)/60
-	if m == 0 {
-		return fmt.Sprintf("%dh", h)
-	}
-	return fmt.Sprintf("%dh %dm", h, m)
+	return fmt.Sprintf("%dh %02dm", s/3600, (s%3600)/60)
 }
 
 // humanRate renders throughput: `25 tok/s`, `5.3 tok/s`. Returns "" on
