@@ -179,7 +179,8 @@ func TestBashTimeoutOverflowClamped(t *testing.T) {
 
 // TestBashParentCancelMidRun: parent cancel mid-sleep returns "(cancelled)",
 // not a misleading "(timeout after Xs)" or stale exit code. Parent cancel
-// always wins over timeout: it's the user's signal.
+// wins when it fires before the deadline: it's the user's signal (a latched
+// DeadlineExceeded still labels as timeout, since the timeout killed first).
 func TestBashParentCancelMidRun(t *testing.T) {
 	parent, cancel := context.WithCancel(context.Background())
 	go func() {

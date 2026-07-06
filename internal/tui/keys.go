@@ -207,9 +207,10 @@ func (m Model) handleEscInPopover() (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
-// handleEnter implements the three-way Enter dispatch. Alt+Enter inserts a
-// newline; command-level Enter on an args-taking command advances to the arg
-// popover (same model as Tab); plain Enter commits.
+// handleEnter implements the four-way Enter dispatch. Alt+Enter inserts a
+// newline; mid-turn Enter queues the prompt (queuePrompt); command-level Enter
+// on an args-taking command advances to the arg popover (same model as Tab);
+// plain Enter commits.
 func (m Model) handleEnter(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	if msg.Alt {
 		// Strip the Alt flag before forwarding: the textarea's InsertNewline

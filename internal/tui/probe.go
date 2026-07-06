@@ -19,9 +19,14 @@ const probeTimeout = 15 * time.Second
 // probeMsg carries the outcome of an activation-time Probe (hello-world chat):
 // validates URL+model+key in one round trip and harvests the live context
 // window from response headers. profile is tagged explicitly so a late probe
-// can't overwrite the wrong profile's window after a /models switch.
+// can't overwrite the wrong profile's window after a /models switch; cli tags
+// the client instance the probe dialed with (mirroring pingMsg's baseURL tag),
+// because two probes for the SAME profile can be in flight at once (startup
+// probe + a /models or /hamrpass re-activation) and the profile name alone
+// can't tell the superseded one from the fresh one.
 type probeMsg struct {
 	profile       string
+	cli           *llm.Client
 	contextWindow int
 	budget        cloud.BudgetStatus
 	silent        bool // suppress the "✓ active" line; startup probe only
@@ -38,6 +43,7 @@ func probeBackend(cli *llm.Client, profileName string, silent bool) tea.Cmd {
 		res, err := cli.Probe(ctx)
 		return probeMsg{
 			profile:       profileName,
+			cli:           cli,
 			contextWindow: res.ContextWindow,
 			budget:        res.Budget,
 			silent:        silent,
@@ -52,11 +58,14 @@ func probeBackend(cli *llm.Client, profileName string, silent bool) tea.Cmd {
 // profile still update liveContextSize, ready for when the user switches back.
 //
 // Connection-state mutations (m.connected, m.budget) are gated on the probe's
-// profile still being active. A probe for profile a that finishes after the
-// user has /models'd to b can't flip b's reachability indicator on a's stale
-// outcome.
+// client still being the live one (rebuildClient swaps the pointer on every
+// re-activation, so identity is exact). A probe for profile a finishing after
+// a /models switch to b, or a hung probe finishing after a SAME-profile
+// re-activation already succeeded, can't flip the fresh state on a stale
+// outcome. The liveContextSize cache write below stays keyed on the profile
+// name alone: seeding an inactive profile's window is deliberately allowed.
 func (m Model) handleProbe(msg probeMsg) (tea.Model, tea.Cmd) {
-	active := msg.profile == m.cfg.Active
+	active := msg.cli == m.cli && msg.profile == m.cfg.Active
 	if msg.err != nil {
 		if active {
 			m.connected = false
@@ -69,8 +78,10 @@ func (m Model) handleProbe(msg probeMsg) (tea.Model, tea.Cmd) {
 		}
 		// Silent startup probes print no banner either way; an offline launch
 		// shouldn't greet the user with "⚠ probe". connected=false suffices;
-		// the next user action surfaces the real failure.
-		if !msg.silent {
+		// the next user action surfaces the real failure. Stale probes stay
+		// quiet too: a superseded failure landing after the fresh probe's
+		// "✓ active" would read as the backend dying right after coming up.
+		if !msg.silent && active {
 			m.appendLine(styleError.Render("⚠ probe " + msg.profile + ": " + probeErrorMessage(msg.err)))
 		}
 		return m, nil
@@ -100,8 +111,11 @@ func (m Model) handleProbe(msg probeMsg) (tea.Model, tea.Cmd) {
 	if msg.contextWindow > 0 {
 		suffix = fmt.Sprintf(" · ctx: %s", humanInt(msg.contextWindow))
 	}
+	// ActiveURL, not p.URL: only reached when this probe's profile is active,
+	// and under a CODEHAMR_URL override the banner must name the endpoint that
+	// was actually dialed, not the config value the override displaced.
 	m.appendLine(styleOK.Render(fmt.Sprintf(
-		"✓ active: %s · %s @ %s%s", msg.profile, p.LLM, p.URL, suffix)))
+		"✓ active: %s · %s @ %s%s", msg.profile, p.LLM, m.cfg.ActiveURL(), suffix)))
 	return m, nil
 }
 

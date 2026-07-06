@@ -315,7 +315,7 @@ func TestPopoverTabOnEmptyOpensCommandList(t *testing.T) {
 		t.Fatalf("popover should show all commands, got %d of %d",
 			len(om.suggest), len(commands))
 	}
-	// second Tab cycles (5 commands → selection moves from 0 to 1)
+	// second Tab cycles (selection moves from 0 to 1)
 	mm2, _ := om.Update(tea.KeyMsg{Type: tea.KeyTab})
 	if mm2.(Model).suggestIdx != 1 {
 		t.Fatalf("second Tab should cycle to idx 1, got %d", mm2.(Model).suggestIdx)
@@ -1210,7 +1210,7 @@ func budgetResponseHandler(w http.ResponseWriter, _ *http.Request) {
 func TestHandleProbeSuccessUpdatesLiveCtxAndPrintsActivation(t *testing.T) {
 	m := newTestModel(t, func(http.ResponseWriter, *http.Request) {})
 	m.cfg.Active = "hamrpass"
-	out, _ := m.handleProbe(probeMsg{profile: "hamrpass", contextWindow: 262144})
+	out, _ := m.handleProbe(probeMsg{profile: "hamrpass", cli: m.cli, contextWindow: 262144})
 	final := out.(Model)
 	if got := final.liveContextSize["hamrpass"]; got != 262144 {
 		t.Fatalf("liveContextSize[hamrpass] = %d, want 262144", got)
@@ -1288,10 +1288,33 @@ func TestStaleProbeForOldProfileDoesNotOverwriteConnectedFlag(t *testing.T) {
 		t.Fatal("stale failure probe overwrote live connected=true")
 	}
 
-	// Sanity: a probe for the live profile DOES update.
-	out, _ = m.handleProbe(probeMsg{profile: "local", err: cloud.ErrUnauthorized, silent: true})
+	// Sanity: a probe for the live profile with the live client DOES update.
+	out, _ = m.handleProbe(probeMsg{profile: "local", cli: m.cli, err: cloud.ErrUnauthorized, silent: true})
 	if out.(Model).connected {
 		t.Fatal("probe for the live profile must update connected")
+	}
+}
+
+// TestStaleProbeForSameProfileDoesNotOverwriteFreshOutcome: two probes for the
+// SAME profile can be in flight (startup probe + a re-activation); the profile
+// name alone can't tell them apart, so staleness is keyed on the client
+// pointer (rebuildClient swaps it per re-activation). A hung old probe's
+// failure landing after the fresh probe's success must neither flip connected
+// nor print a contradictory "⚠ probe" banner after the "✓ active" line.
+func TestStaleProbeForSameProfileDoesNotOverwriteFreshOutcome(t *testing.T) {
+	m := newTestModel(t, func(http.ResponseWriter, *http.Request) {})
+	m.cfg.Active = "local"
+	staleCli := m.cli
+	m.rebuildClient() // re-activation swapped the client; staleCli's probe is now superseded
+	m.connected = true
+
+	out, _ := m.handleProbe(probeMsg{profile: "local", cli: staleCli, err: cloud.ErrUnauthorized})
+	final := out.(Model)
+	if !final.connected {
+		t.Fatal("stale same-profile probe failure must not flip connected")
+	}
+	if got := stripANSI(final.scroll.String()); strings.Contains(got, "⚠ probe") {
+		t.Fatalf("stale same-profile probe must not print a failure banner:\n%s", got)
 	}
 }
 
@@ -1303,6 +1326,7 @@ func TestProbeBudgetExhaustedUpdatesStatusBar(t *testing.T) {
 	m.cfg.Active = "hamrpass"
 	out, _ := m.handleProbe(probeMsg{
 		profile: "hamrpass",
+		cli:     m.cli,
 		budget:  cloud.BudgetStatus{Set: true, Remaining: 0},
 		silent:  true,
 		err:     cloud.ErrBudgetExhausted,
@@ -1596,7 +1620,8 @@ func TestHumanTokensFormat(t *testing.T) {
 
 // TestLiveElapsed: the running wall-clock readout, whole seconds under a
 // minute (no spinning sub-second decimal at the spinner's refresh rate), then
-// `6m 51s` / `1h 14m`, with the trailing unit dropped when zero.
+// `6m 51s` / `1h 14m`, with the lower unit always two digits and never
+// dropped (`8m 00s`, not `8m`), so the readout never shrinks mid-turn.
 func TestLiveElapsed(t *testing.T) {
 	cases := []struct {
 		d    time.Duration
@@ -3186,10 +3211,10 @@ func TestStaleProbeDoesNotPrintActivationBannerForNonActiveProfile(t *testing.T)
 		t.Fatalf("stale probe must not print activation banner for non-active profile:\n%s", got)
 	}
 
-	// Sanity: probe for the live profile DOES print the banner.
+	// Sanity: probe for the live profile with the live client DOES print the banner.
 	m2 := newTestModel(t, func(http.ResponseWriter, *http.Request) {})
 	m2.cfg.Active = "local"
-	out2, _ := m2.handleProbe(probeMsg{profile: "local", contextWindow: 256000})
+	out2, _ := m2.handleProbe(probeMsg{profile: "local", cli: m2.cli, contextWindow: 256000})
 	final2 := out2.(Model)
 	if got := stripANSI(final2.scroll.String()); !strings.Contains(got, "✓ active: local") {
 		t.Fatalf("active-profile probe must print activation banner:\n%s", got)
@@ -3273,7 +3298,7 @@ func TestEmptyReplyNudgeRePromptsThenRecovers(t *testing.T) {
 	if !strings.Contains(scroll, "fixed and verified") {
 		t.Fatalf("recovered summary missing from scroll:\n%s", scroll)
 	}
-	if strings.Contains(scroll, "your model server dropped the call") {
+	if strings.Contains(scroll, "dropped the call") {
 		t.Fatalf("a recovered turn must not surface the persistent-empty diagnostic:\n%s", scroll)
 	}
 	if final.phase != phaseIdle {

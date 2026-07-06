@@ -5,6 +5,7 @@ package ctx
 import (
 	"fmt"
 	"slices"
+	"strings"
 	"unicode/utf8"
 )
 
@@ -296,13 +297,15 @@ func newestToolIndex(history []Message) int {
 // onlyNonSubstantive reports whether kept carries no substantive conversation:
 // only system-role notes (soft nudges) and empty assistant messages (no text,
 // no tool calls - the stall shape the empty-reply nudge answers, appended
-// right before that nudge). Vacuously true for an empty slice.
+// right before that nudge). TrimSpace matches tui.newestAssistantEmpty's
+// definition of "empty", so a whitespace-only stall can't mask the recovery.
+// Vacuously true for an empty slice.
 func onlyNonSubstantive(kept []Message) bool {
 	for _, m := range kept {
 		if m.Role == RoleSystem {
 			continue
 		}
-		if m.Role == RoleAssistant && m.Content == "" && len(m.ToolCalls) == 0 {
+		if m.Role == RoleAssistant && strings.TrimSpace(m.Content) == "" && len(m.ToolCalls) == 0 {
 			continue
 		}
 		return false

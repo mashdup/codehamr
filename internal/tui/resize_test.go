@@ -198,7 +198,7 @@ func TestWidenResizeAlsoSuppresses(t *testing.T) {
 
 // TestHeightOnlyResizeDoesNotClear: a height-only change can't induce the
 // soft-wrap that breaks bubbletea's cursor math (no line widens), so the
-// hardening path stays reserved for width narrowing.
+// hardening path stays reserved for width changes.
 func TestHeightOnlyResizeDoesNotClear(t *testing.T) {
 	cfg, _, _ := config.Bootstrap(t.TempDir())
 	m := New(cfg, llm.New("http://x", cfg.ActiveProfile().LLM, ""), t.TempDir(), "test")

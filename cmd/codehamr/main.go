@@ -188,15 +188,20 @@ func maybeSelfUpdate() {
 	// PID) vs. Windows spawn-and-wait. CODEHAMR_NO_UPDATE_CHECK=1 stops the
 	// replacement run from re-checking its own freshly-written hash. On
 	// reExec failure we fall through to the old in-memory binary.
-	//
-	// os.Setenv overwrites in place so os.Environ() carries exactly one entry;
-	// append(os.Environ(), …) would leave a pre-existing user-set value first,
-	// and Unix execve resolves os.Getenv to the FIRST match, silently defeating
-	// the guard if someone exported CODEHAMR_NO_UPDATE_CHECK to a non-"1" value.
-	os.Setenv("CODEHAMR_NO_UPDATE_CHECK", "1")
-	if err := reExec(exe, os.Args, os.Environ()); err != nil {
+	if err := reExec(exe, os.Args, reexecEnv()); err != nil {
 		fmt.Fprintf(os.Stderr, "⚠ re-exec failed: %v (continuing with previous version)\n", err)
 	}
+}
+
+// reexecEnv arms the update-loop guard and returns the environment for the
+// re-exec'd child. os.Setenv overwrites in place so os.Environ() carries
+// exactly one entry; append(os.Environ(), …) would leave a pre-existing
+// user-set value first, and Unix execve resolves os.Getenv to the FIRST
+// match, silently defeating the guard if someone exported
+// CODEHAMR_NO_UPDATE_CHECK to a non-"1" value.
+func reexecEnv() []string {
+	os.Setenv("CODEHAMR_NO_UPDATE_CHECK", "1")
+	return os.Environ()
 }
 
 // mustCwd returns the working directory or exits 1, called only where

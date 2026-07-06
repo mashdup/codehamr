@@ -36,6 +36,8 @@ Windows:
 curl -fsSL https://codehamr.com/install.cmd -o install.cmd && install.cmd
 ```
 
+> **Windows note:** codehamr's `bash` tool needs a POSIX shell (`/bin/sh`), so on Windows run it inside WSL2 or a devcontainer, not from a bare `cmd`/PowerShell host.
+
 Then run `codehamr` in your project.
 
 > **Warning:** AI systems like codehamr run model-generated shell commands with full filesystem access. Best run inside safe sandboxes like devcontainers or isolated VMs.
@@ -98,7 +100,7 @@ codehamr verifies by running things, so give its sandbox the toolchains your pro
 |---|---|
 | **Frontier** | you want commercial heavyweight polish from Claude Code or Codex and accept the subscription cost and session timeouts |
 | **[opencode](https://github.com/anomalyco/opencode)** | you want a great, loaded Swiss army knife and embrace plugin complexity |
-| **[pi-agent](https://github.com/badlogic/pi-mono)** | you want something lighter than opencode and accept configuring your own extensions, skills, and themes |
+| **[pi](https://github.com/earendil-works/pi)** | you want something lighter than opencode and accept configuring your own extensions, skills, and themes |
 | **codehamr** | you want the lightest take and prefer simplicity over complexity, with minimal config and a well-crafted system prompt instead of plugin and skill bloat |
 
 ## HamrPass

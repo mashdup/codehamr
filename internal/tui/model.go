@@ -90,8 +90,7 @@ type queuedPrompt struct {
 }
 
 type Model struct {
-	Version    string
-	ProjectDir string
+	Version string
 
 	cfg *config.Config
 	cli *llm.Client
@@ -205,12 +204,12 @@ type Model struct {
 	cancel      context.CancelFunc
 	quitArmedAt time.Time // first Ctrl+C in idle arms; second within 3s quits
 
-	status string // transient status-bar warning (cleared next render cycle)
+	status string // transient status-bar hint; cleared by the event that obsoletes it (keypress, quit-arm timer, endTurn)
 	phase  phase  // idle / thinking / streaming / running
 
-	// Repeated-failure nudge, the only deterministic backstop. A turn
-	// otherwise ends purely when the model stops calling tools; nothing forces
-	// a tool or yields. lastToolKey is the most recently dispatched tool's
+	// Repeated-failure nudge, the first of the four deterministic backstops. A
+	// turn otherwise ends purely when the model stops calling tools; nothing
+	// forces a tool or yields. lastToolKey is the most recently dispatched tool's
 	// target identity (set in dispatchNextTool); failKey/failStreak track how
 	// often that SAME target failed the SAME way. At maxToolFailStreak we inject
 	// one system note to change approach: a nudge, never a hard yield. Keyed on
@@ -238,8 +237,10 @@ type Model struct {
 	// model stopped mid-task, or (on a thinking model) its tool call streamed into
 	// the reasoning channel and was dropped before reaching us, the dominant
 	// silent-death we'd otherwise end on with no warning. One re-prompt to re-issue
-	// or finish; emptyNudged latches it to once per turn so a server that
-	// deterministically swallows the call can't loop. Reset in endTurn.
+	// or finish; emptyNudged bounds CONSECUTIVE empties to a single retry - a
+	// round that issues a tool call re-arms it (see handleStreamClosed), so a
+	// flaky stream earns a fresh re-prompt per stall while a server that
+	// deterministically swallows every call can't loop. Reset in endTurn.
 	emptyNudged bool
 
 	// Finish re-grounding nudge, the fourth soft backstop. The three above catch
@@ -276,15 +277,14 @@ func New(cfg *config.Config, cli *llm.Client, projectDir, version string) Model 
 	sp.Style = styleSpinner
 
 	m := Model{
-		Version:    version,
-		ProjectDir: projectDir,
-		cfg:        cfg,
-		cli:        cli,
-		system:     buildSystem(projectDir),
-		ta:         ta,
-		renderer:   r,
-		spinner:    sp,
-		connected:  true, // optimistic until the first ping proves otherwise
+		Version:   version,
+		cfg:       cfg,
+		cli:       cli,
+		system:    buildSystem(projectDir),
+		ta:        ta,
+		renderer:  r,
+		spinner:   sp,
+		connected: true, // optimistic until the first ping proves otherwise
 		// width/height left at 0; View() returns "" until the first
 		// WindowSizeMsg, so we don't flash an 80×24 frame then resize.
 		streaming:       new(strings.Builder),
@@ -987,19 +987,25 @@ func (m Model) fireQueued() (tea.Model, tea.Cmd) {
 	return m.submit(q.send, q.echo, promptEntry{display: q.send})
 }
 
+// newestAssistant returns the newest assistant-role message in history: the
+// turn's final reply, which all three finish checks below inspect.
+func newestAssistant(history []chmctx.Message) (chmctx.Message, bool) {
+	for i := len(history) - 1; i >= 0; i-- {
+		if history[i].Role == chmctx.RoleAssistant {
+			return history[i], true
+		}
+	}
+	return chmctx.Message{}, false
+}
+
 // newestAssistantEmpty reports whether the turn's final assistant message
 // carried neither text nor a structured tool call. A clean finish always has a
 // summary and a continuing turn always has a tool call, so an empty newest
 // assistant message is always an anomaly: the model stopped mid-task, or its
 // call streamed into the reasoning channel and was dropped before reaching us.
 func newestAssistantEmpty(history []chmctx.Message) bool {
-	for i := len(history) - 1; i >= 0; i-- {
-		if history[i].Role != chmctx.RoleAssistant {
-			continue
-		}
-		return strings.TrimSpace(history[i].Content) == "" && len(history[i].ToolCalls) == 0
-	}
-	return false
+	msg, ok := newestAssistant(history)
+	return ok && strings.TrimSpace(msg.Content) == "" && len(msg.ToolCalls) == 0
 }
 
 // newestAssistantUnverified reports whether the turn's final assistant message
@@ -1008,13 +1014,8 @@ func newestAssistantEmpty(history []chmctx.Message) bool {
 // "Unverified" interchangeably. Used to suppress the finish nudge on a finish
 // that already named what it couldn't prove (see maybeVerifyNudge).
 func newestAssistantUnverified(history []chmctx.Message) bool {
-	for i := len(history) - 1; i >= 0; i-- {
-		if history[i].Role != chmctx.RoleAssistant {
-			continue
-		}
-		return strings.Contains(strings.ToLower(history[i].Content), "unverified")
-	}
-	return false
+	msg, ok := newestAssistant(history)
+	return ok && strings.Contains(strings.ToLower(msg.Content), "unverified")
 }
 
 // toolCallLeakWarning returns a user-facing diagnostic when the newest assistant
@@ -1031,19 +1032,14 @@ func newestAssistantUnverified(history []chmctx.Message) bool {
 // not parse or run the leaked call); it points the user at the server-side fix.
 // Empty string when there is nothing to warn.
 func toolCallLeakWarning(history []chmctx.Message) string {
-	for i := len(history) - 1; i >= 0; i-- {
-		if history[i].Role != chmctx.RoleAssistant {
-			continue
-		}
-		if len(history[i].ToolCalls) > 0 {
-			return "" // it called a tool properly; the prose tag is incidental
-		}
-		if strings.Contains(history[i].Content, "<tool_call>") {
-			return styleError.Render("⚠ a tool call leaked into the reply as text instead of running - your model server isn't parsing tool calls. Enable its OpenAI tool-call parser server-side (e.g. vLLM `--tool-call-parser`, llama.cpp `--jinja`).")
-		}
-		return "" // newest assistant message is clean
+	msg, ok := newestAssistant(history)
+	if !ok || len(msg.ToolCalls) > 0 {
+		return "" // no assistant yet, or it called a tool properly; the prose tag is incidental
 	}
-	return ""
+	if strings.Contains(msg.Content, "<tool_call>") {
+		return styleError.Render("⚠ a tool call leaked into the reply as text instead of running - your model server isn't parsing tool calls. Enable its OpenAI tool-call parser server-side (e.g. vLLM `--tool-call-parser`, llama.cpp `--jinja`).")
+	}
+	return "" // newest assistant message is clean
 }
 
 // dispatchNextTool pops the next pending tool call and runs it. Every tool

@@ -1,10 +1,13 @@
 package tui
 
 import (
+	"net/http"
 	"strings"
 	"testing"
 
 	"github.com/charmbracelet/x/ansi"
+
+	"github.com/codehamr/codehamr/internal/llm"
 )
 
 // A prompt echo (or any content line) wider than the terminal must be wrapped
@@ -56,6 +59,36 @@ func TestWrapForScrollbackExpandsTabs(t *testing.T) {
 		if w := ansi.StringWidth(line); w > width {
 			t.Fatalf("expanded line width %d exceeds %d: %q", w, width, line)
 		}
+	}
+}
+
+// TestRenderQueuedCapsVisualRows: queuedBodyCap bounds RENDERED rows, not
+// logical lines. A single long echo line soft-wraps inside lipgloss, so an
+// uncapped wrap would let the queued box push the status bar off-screen -
+// exactly what the cap's own comment promises can't happen.
+func TestRenderQueuedCapsVisualRows(t *testing.T) {
+	m := newTestModel(t, func(http.ResponseWriter, *http.Request) {})
+	m.width = 40
+	m.queued = &queuedPrompt{echo: strings.Repeat("word ", 100)} // one ~500-cell logical line
+	// title line + rounded border (2) + capped body + "+N more" line.
+	if rows, maxRows := m.queuedHeight(), 1+2+queuedBodyCap+1; rows > maxRows {
+		t.Fatalf("queued box renders %d rows for a single long line, want <= %d", rows, maxRows)
+	}
+	if !strings.Contains(m.renderQueued(), "more") {
+		t.Fatal("overflow must collapse into a +N more line")
+	}
+}
+
+// TestApplyContentExpandsTabs: the live streaming buffer must never carry
+// tabs. View's ansi.Wrap counts a tab as one cell while the terminal expands
+// it to an 8-column stop - the same width drift wrapForScrollback guards
+// against for scrollback, on the path that renders every streamed token.
+func TestApplyContentExpandsTabs(t *testing.T) {
+	m := newTestModel(t, func(http.ResponseWriter, *http.Request) {})
+	m.phase = phaseThinking
+	m.applyContent(llm.Event{Kind: llm.EventContent, Content: "a\tb"})
+	if got := m.streaming.String(); got != "a    b" {
+		t.Fatalf("tabs must be expanded entering the live buffer, got %q", got)
 	}
 }
 

@@ -125,9 +125,10 @@ type Event struct {
 	Content string
 	// ContextWindow is the server-authoritative context size from the
 	// X-Context-Window header, set only on EventDone when the server sent it.
-	// The TUI overwrites the profile's in-memory ContextSize so the next
-	// ctx.Pack uses what the server allows, not config.yaml's guess. Zero
-	// means no live value in this response.
+	// The TUI records it in a runtime-only per-profile map (tui.Model's
+	// liveContextSize) that outranks the profile's on-disk ContextSize, so the
+	// next ctx.Pack uses what the server allows without the live value ever
+	// reaching config.yaml. Zero means no live value in this response.
 	ContextWindow int
 	ToolCall      *chmctx.ToolCall
 	Final         *chmctx.Message
