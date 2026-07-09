@@ -24,9 +24,18 @@ type ToolCall struct {
 	Arguments map[string]any `json:"arguments"`
 }
 
+// Image is one inline attachment on a user message, stored as raw base64
+// (no data: prefix; the wire layer adds it). Only multimodal endpoints accept
+// these; text-only servers reject the request and the error surfaces as-is.
+type Image struct {
+	MIME    string `json:"mime"`
+	DataB64 string `json:"data_b64"`
+}
+
 type Message struct {
 	Role       Role       `json:"role"`
 	Content    string     `json:"content"`
+	Images     []Image    `json:"images,omitempty"`
 	ToolCalls  []ToolCall `json:"tool_calls,omitempty"`
 	ToolCallID string     `json:"tool_call_id,omitempty"`
 	ToolName   string     `json:"name,omitempty"`
@@ -35,8 +44,16 @@ type Message struct {
 // Tokens approximates token count as char/4, good enough for budgeting.
 func Tokens(s string) int { return (len(s) + 3) / 4 }
 
+// imageTokenEstimate is the packing cost charged per attached image. Vision
+// models bill anywhere from ~85 to ~1100+ tokens per image depending on
+// resolution and provider; a flat conservative figure keeps Pack honest
+// without a per-provider table. The base64 payload itself is NOT text tokens
+// and must not be counted as such.
+const imageTokenEstimate = 1000
+
 func (m Message) Tokens() int {
 	n := Tokens(m.Content)
+	n += len(m.Images) * imageTokenEstimate
 	for _, tc := range m.ToolCalls {
 		n += Tokens(tc.Name)
 		for k, v := range tc.Arguments {

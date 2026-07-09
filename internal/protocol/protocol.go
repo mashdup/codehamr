@@ -44,16 +44,23 @@ const fallbackContextSize = 32768
 // screenshots while still refusing a runaway writer.
 const maxCommandLine = 32 << 20
 
-// command is every client→agent line, one flat struct: with five small
-// variants, a tagged union isn't worth the decode ceremony.
+// command is every client→agent line, one flat struct: with a handful of
+// small variants, a tagged union isn't worth the decode ceremony.
 type command struct {
-	V        int    `json:"v"`
-	Type     string `json:"type"`
-	Text     string `json:"text,omitempty"`     // prompt
-	CallID   string `json:"callId,omitempty"`   // approve
-	Decision string `json:"decision,omitempty"` // approve: allow|deny
-	Scope    string `json:"scope,omitempty"`    // approve: once|session
-	Name     string `json:"name,omitempty"`     // set_model
+	V        int         `json:"v"`
+	Type     string      `json:"type"`
+	Text     string      `json:"text,omitempty"`     // prompt
+	Images   []imageAtt  `json:"images,omitempty"`   // prompt
+	CallID   string      `json:"callId,omitempty"`   // approve
+	Decision string      `json:"decision,omitempty"` // approve: allow|deny
+	Scope    string      `json:"scope,omitempty"`    // approve: once|session
+	Name     string      `json:"name,omitempty"`     // set_model
+}
+
+// imageAtt mirrors the harness's wire field names for one attachment.
+type imageAtt struct {
+	MIME    string `json:"mime"`
+	DataB64 string `json:"dataB64"`
 }
 
 // modelInfo is one profile as shown to the harness. The key never crosses the
@@ -117,6 +124,9 @@ type Runner struct {
 
 	turnMu     sync.Mutex
 	turnCancel context.CancelFunc
+	// turnSeq tokens each turn so a finished turn's deferred cleanup can't
+	// null out the cancel func a newer turn just installed.
+	turnSeq uint64
 
 	// approvals routes an approve command to the turn goroutine blocked on
 	// that callId. Registered before the tool_call event is emitted, so an
@@ -174,7 +184,7 @@ func (r *Runner) dispatch(cmd command) {
 			r.emitError("a turn is already in progress", false)
 			return
 		}
-		go r.runTurn(cmd.Text)
+		go r.runTurn(cmd.Text, cmd.Images)
 	case "approve":
 		r.deliverApproval(cmd)
 	case "cancel":
@@ -211,29 +221,27 @@ func (r *Runner) dispatch(cmd command) {
 // Turn loop
 // ---------------------------------------------------------------------------
 
-func (r *Runner) runTurn(text string) {
-	defer r.releaseTurn()
+func (r *Runner) runTurn(text string, images []imageAtt) {
+	turnCtx, cancel := context.WithCancel(context.Background())
+	seq := r.installTurn(cancel)
 	// A panic in the turn loop must reach the harness as a readable fatal
 	// error, not kill the process silently mid-session. The stack still goes
 	// to stderr for the post-mortem; the session survives for the next prompt.
 	defer func() {
 		if p := recover(); p != nil {
 			fmt.Fprintf(os.Stderr, "panic in turn: %v\n%s", p, debug.Stack())
-			r.emitError(fmt.Sprintf("internal error (panic): %v — the session is still alive, but please report this", p), true)
+			fatal := true
+			r.finishTurn(event{V: V, Type: "error", Fatal: &fatal,
+				Message: fmt.Sprintf("internal error (panic): %v — the session is still alive, but please report this", p)})
 		}
 	}()
+	defer r.dropTurn(seq, cancel)
 
-	turnCtx, cancel := context.WithCancel(context.Background())
-	r.setTurnCancel(cancel)
-	defer func() {
-		cancel()
-		r.setTurnCancel(nil)
-	}()
-	// Persist on every exit path (done, error, cancel, recovered panic) so a
-	// harness restart resumes the conversation where it stopped.
-	defer r.saveSession()
-
-	r.history = append(r.history, chmctx.Message{Role: chmctx.RoleUser, Content: text})
+	user := chmctx.Message{Role: chmctx.RoleUser, Content: text}
+	for _, img := range images {
+		user.Images = append(user.Images, chmctx.Image{MIME: img.MIME, DataB64: img.DataB64})
+	}
+	r.history = append(r.history, user)
 
 	var lastUsage *usage
 	for {
@@ -246,26 +254,59 @@ func (r *Runner) runTurn(text string) {
 				// User cancel: not an error, the turn just ends here. History
 				// keeps only what completed; Pack's dangling/orphan passes
 				// handle any half-finished tool exchange on the next turn.
-				r.emit(event{V: V, Type: "turn_done"})
+				r.finishTurn(event{V: V, Type: "turn_done"})
 				return
 			}
-			r.emitError(err.Error(), false)
+			nonFatal := false
+			r.finishTurn(event{V: V, Type: "error", Message: err.Error(), Fatal: &nonFatal})
 			return
 		}
 		r.history = append(r.history, *final)
 		r.emit(event{V: V, Type: "assistant_done"})
 
 		if len(final.ToolCalls) == 0 {
-			r.emit(event{V: V, Type: "turn_done", Usage: lastUsage})
+			r.finishTurn(event{V: V, Type: "turn_done", Usage: lastUsage})
 			return
 		}
 		for i := range final.ToolCalls {
 			if !r.runTool(turnCtx, &final.ToolCalls[i]) {
-				r.emit(event{V: V, Type: "turn_done"})
+				r.finishTurn(event{V: V, Type: "turn_done"})
 				return // cancelled mid-dispatch
 			}
 		}
 	}
+}
+
+// installTurn registers this turn's cancel func and returns its token.
+func (r *Runner) installTurn(cancel context.CancelFunc) uint64 {
+	r.turnMu.Lock()
+	defer r.turnMu.Unlock()
+	r.turnSeq++
+	r.turnCancel = cancel
+	return r.turnSeq
+}
+
+// dropTurn releases the turn context; the seq guard keeps a finished turn's
+// deferred cleanup from clearing a newer turn's cancel func.
+func (r *Runner) dropTurn(seq uint64, cancel context.CancelFunc) {
+	cancel()
+	r.turnMu.Lock()
+	if r.turnSeq == seq {
+		r.turnCancel = nil
+	}
+	r.turnMu.Unlock()
+}
+
+// finishTurn persists the session, frees the busy slot, and only THEN emits
+// the terminal event. The order is the contract: a client may send its next
+// prompt the instant it sees turn_done/error, so busy must already be false —
+// releasing in a defer raced exactly that and rejected the follow-up prompt.
+// Every runTurn exit path funnels through here (the panic recovery included);
+// nothing turn-owned may run after it.
+func (r *Runner) finishTurn(e event) {
+	r.saveSession()
+	r.releaseTurn()
+	r.emit(e)
 }
 
 // chatRound streams one LLM round, forwarding deltas as events, and returns
@@ -513,12 +554,6 @@ func (r *Runner) isBusy() bool {
 	r.busyMu.Lock()
 	defer r.busyMu.Unlock()
 	return r.busy
-}
-
-func (r *Runner) setTurnCancel(c context.CancelFunc) {
-	r.turnMu.Lock()
-	r.turnCancel = c
-	r.turnMu.Unlock()
 }
 
 func (r *Runner) cancelTurn() {

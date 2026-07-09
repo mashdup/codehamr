@@ -48,13 +48,32 @@ type FunctionDef struct {
 //
 // Content has no omitempty: silent bash commands (e.g. heredoc writes) yield an
 // empty tool-result string, and omitting the field makes Ollama's /v1 shim 400
-// with "invalid message content type: <nil>". Always send an explicit string.
+// with "invalid message content type: <nil>". Always send an explicit value.
+//
+// Content is `any` but only ever holds two shapes: a plain string (every
+// text-only message, the overwhelmingly common case) or []contentPart when a
+// user message carries images. Text-only messages MUST stay plain strings on
+// the wire: some OpenAI-compatible servers accept parts arrays only for
+// vision models, and the string form is what the whole ecosystem tests.
 type wireMessage struct {
 	Role       string     `json:"role"`
-	Content    string     `json:"content"`
+	Content    any        `json:"content"`
 	Name       string     `json:"name,omitempty"`         // tool name
 	ToolCallID string     `json:"tool_call_id,omitempty"` // tool role
 	ToolCalls  []toolCall `json:"tool_calls,omitempty"`
+}
+
+// contentPart is one element of a multimodal content array, OpenAI vision
+// wire format: {type:"text",text} or {type:"image_url",image_url:{url}} with
+// a base64 data: URL.
+type contentPart struct {
+	Type     string    `json:"type"`
+	Text     string    `json:"text,omitempty"`
+	ImageURL *imageURL `json:"image_url,omitempty"`
+}
+
+type imageURL struct {
+	URL string `json:"url"`
 }
 
 type toolCall struct {
@@ -610,7 +629,7 @@ func toWire(msgs []chmctx.Message) []wireMessage {
 	for _, m := range msgs {
 		om := wireMessage{
 			Role:       string(m.Role),
-			Content:    m.Content,
+			Content:    wireContent(m),
 			Name:       m.ToolName,
 			ToolCallID: m.ToolCallID,
 		}
@@ -628,6 +647,24 @@ func toWire(msgs []chmctx.Message) []wireMessage {
 		out = append(out, om)
 	}
 	return out
+}
+
+// wireContent picks the wire shape for a message's content: the plain string
+// for every text-only message (see wireMessage.Content), a parts array only
+// when images are attached. The text part is included even when empty-ish so
+// providers that require at least one text part don't reject the message.
+func wireContent(m chmctx.Message) any {
+	if len(m.Images) == 0 {
+		return m.Content
+	}
+	parts := []contentPart{{Type: "text", Text: m.Content}}
+	for _, img := range m.Images {
+		parts = append(parts, contentPart{
+			Type:     "image_url",
+			ImageURL: &imageURL{URL: "data:" + img.MIME + ";base64," + img.DataB64},
+		})
+	}
+	return parts
 }
 
 func firstLine(s string) string {
