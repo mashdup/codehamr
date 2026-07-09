@@ -14,6 +14,7 @@ import (
 
 	"github.com/codehamr/codehamr/internal/config"
 	"github.com/codehamr/codehamr/internal/llm"
+	"github.com/codehamr/codehamr/internal/protocol"
 	"github.com/codehamr/codehamr/internal/tui"
 	"github.com/codehamr/codehamr/internal/update"
 )
@@ -38,6 +39,12 @@ func main() {
 			return
 		case "-h", "--help", "help":
 			printHelp()
+			return
+		case "--json":
+			// Headless NDJSON mode for GUI harnesses: same agent core, no TUI.
+			// No self-update either; the harness owns the binary's lifecycle
+			// and a surprise re-exec would sever its stdio pipes mid-session.
+			runJSON()
 			return
 		}
 	}
@@ -97,12 +104,31 @@ func main() {
 	}
 }
 
+// runJSON is the --json entry point: the same bootstrap sequence as the TUI
+// path minus everything terminal-facing (screen clear, Bubbletea, debug-log
+// TUI hooks), handing the session to the headless protocol driver.
+func runJSON() {
+	cwd := mustCwd()
+	cfg, _, err := config.Bootstrap(cwd)
+	if err != nil {
+		log.Fatalf("codehamr: %v", err)
+	}
+	applyEnvOverrides(cfg)
+	p := cfg.ActiveProfile()
+	client := llm.New(cfg.ActiveURL(), p.LLM, p.ResolvedKey())
+	abs, _ := filepath.Abs(cwd)
+	if err := protocol.Run(cfg, client, abs, version); err != nil {
+		log.Fatalf("codehamr: %v", err)
+	}
+}
+
 func printHelp() {
 	fmt.Println(strings.TrimSpace(`
 codehamr, a lightweight, fast coding agent for the terminal.
 
 Usage:
   codehamr             start interactive TUI
+  codehamr --json      headless NDJSON mode (for GUI harnesses)
   codehamr --version   print version
 
 Slash commands (inside TUI):`))
