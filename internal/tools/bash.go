@@ -45,7 +45,13 @@ func Bash(parent context.Context, command string, timeout time.Duration) string 
 	ctxT, cancel := context.WithTimeout(parent, timeout)
 	defer cancel()
 
-	cmd := exec.CommandContext(ctxT, "/bin/sh", "-c", command)
+	// shellPath is platform-split: /bin/sh on Unix, a resolved Git-Bash-style
+	// sh.exe on Windows (where upstream's hardcoded /bin/sh can never exist).
+	sh, shErr := shellPath()
+	if shErr != nil {
+		return "(" + shErr.Error() + ")"
+	}
+	cmd := exec.CommandContext(ctxT, sh, "-c", command)
 	// Shell gets its own process group + a Cancel that kills the whole group
 	// on cancel/timeout (Unix; no-op on Windows). Without it, backgrounded
 	// children (`cmd &`) outlive the parent shell and leak.

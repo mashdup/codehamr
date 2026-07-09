@@ -7,6 +7,10 @@ import (
 	"syscall"
 )
 
+// shellPath returns the POSIX shell the bash tool execs. Trivial on Unix;
+// the Windows counterpart resolves a Git Bash sh.exe.
+func shellPath() (string, error) { return "/bin/sh", nil }
+
 // setProcessGroup gives the shell its own process group and a Cancel that
 // SIGKILLs the whole group. Without it, backgrounded children (`cmd &`) outlive
 // the shell on cancel or timeout, the leak we prevent. Unix-only: Setpgid and
