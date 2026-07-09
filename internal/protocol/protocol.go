@@ -20,6 +20,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 	"runtime/debug"
 	"strings"
 	"sync"
@@ -85,6 +86,7 @@ type event struct {
 	Level   string      `json:"level,omitempty"`       // log
 	Path        string  `json:"path,omitempty"`        // file_diff
 	UnifiedDiff string  `json:"unifiedDiff,omitempty"` // file_diff
+	HistoryLen  int     `json:"historyLen,omitempty"`  // ready: restored messages
 }
 
 type usage struct {
@@ -143,6 +145,7 @@ func Run(cfg *config.Config, client *llm.Client, projectDir, version string) err
 		approvals:      map[string]chan approval{},
 		sessionAllowed: map[string]bool{},
 	}
+	r.loadSession()
 	r.emitModels("ready")
 
 	sc := bufio.NewScanner(os.Stdin)
@@ -191,6 +194,14 @@ func (r *Runner) dispatch(cmd command) {
 		r.emitModels("models")
 	case "get_models":
 		r.emitModels("models")
+	case "clear":
+		if r.isBusy() {
+			r.emitError("cannot clear mid-turn", false)
+			return
+		}
+		r.history = nil
+		_ = os.Remove(r.sessionPath())
+		r.emit(event{V: V, Type: "cleared"})
 	default:
 		r.emitError(fmt.Sprintf("unknown command type: %q", cmd.Type), false)
 	}
@@ -218,6 +229,9 @@ func (r *Runner) runTurn(text string) {
 		cancel()
 		r.setTurnCancel(nil)
 	}()
+	// Persist on every exit path (done, error, cancel, recovered panic) so a
+	// harness restart resumes the conversation where it stopped.
+	defer r.saveSession()
 
 	r.history = append(r.history, chmctx.Message{Role: chmctx.RoleUser, Content: text})
 
@@ -524,7 +538,49 @@ func (r *Runner) emitModels(typ string) {
 			Name: name, LLM: p.LLM, URL: p.URL, ContextSize: p.ContextSize,
 		})
 	}
-	r.emit(event{V: V, Type: typ, Version: r.version, Active: r.cfg.Active, Models: models})
+	e := event{V: V, Type: typ, Version: r.version, Active: r.cfg.Active, Models: models}
+	if typ == "ready" {
+		e.HistoryLen = len(r.history)
+	}
+	r.emit(e)
+}
+
+// ---------------------------------------------------------------------------
+// Session persistence: the conversation survives harness restarts.
+// ---------------------------------------------------------------------------
+
+func (r *Runner) sessionPath() string {
+	return filepath.Join(r.cfg.Dir, "session.json")
+}
+
+// loadSession restores prior history. Corrupt or missing files start fresh;
+// resuming a conversation is a convenience, never a startup blocker.
+func (r *Runner) loadSession() {
+	b, err := os.ReadFile(r.sessionPath())
+	if err != nil {
+		return
+	}
+	var msgs []chmctx.Message
+	if json.Unmarshal(b, &msgs) != nil {
+		return
+	}
+	r.history = msgs
+}
+
+// saveSession writes history via temp+rename so a crash mid-write can't leave
+// a truncated file that loadSession would then half-trust. 0600 like the rest
+// of .codehamr: conversations quote the user's code.
+func (r *Runner) saveSession() {
+	b, err := json.Marshal(r.history)
+	if err != nil {
+		return
+	}
+	path := r.sessionPath()
+	tmp := path + ".tmp"
+	if os.WriteFile(tmp, b, 0o600) != nil {
+		return
+	}
+	_ = os.Rename(tmp, path)
 }
 
 func (r *Runner) emitError(msg string, fatal bool) {
