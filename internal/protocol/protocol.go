@@ -241,9 +241,11 @@ func (r *Runner) runTurn(text string, images []imageAtt) {
 	for _, img := range images {
 		user.Images = append(user.Images, chmctx.Image{MIME: img.MIME, DataB64: img.DataB64})
 	}
+	preTurnLen := len(r.history)
 	r.history = append(r.history, user)
 
 	var lastUsage *usage
+	rounds := 0
 	for {
 		final, u, err := r.chatRound(turnCtx)
 		if u != nil {
@@ -257,10 +259,21 @@ func (r *Runner) runTurn(text string, images []imageAtt) {
 				r.finishTurn(event{V: V, Type: "turn_done"})
 				return
 			}
+			// First-round failure: the model never saw this message, so keep
+			// it out of history — otherwise a message the server rejects
+			// outright (e.g. images sent to a vision-less model: "500: image
+			// input is not supported") is re-sent inside every later request
+			// and poisons the whole session until a manual clear. Rolling
+			// back makes retry-after-fixing clean. Mid-turn failures keep
+			// history: completed rounds really happened.
+			if rounds == 0 {
+				r.history = r.history[:preTurnLen]
+			}
 			nonFatal := false
 			r.finishTurn(event{V: V, Type: "error", Message: err.Error(), Fatal: &nonFatal})
 			return
 		}
+		rounds++
 		r.history = append(r.history, *final)
 		r.emit(event{V: V, Type: "assistant_done"})
 
