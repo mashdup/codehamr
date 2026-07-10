@@ -55,7 +55,16 @@ type command struct {
 	Decision string      `json:"decision,omitempty"` // approve: allow|deny
 	Scope    string      `json:"scope,omitempty"`    // approve: once|session
 	Name     string      `json:"name,omitempty"`     // set_model
+	Mode     string      `json:"mode,omitempty"`     // set_mode: ask|auto
 }
+
+// Permission modes. ModeAsk gates every side-effecting tool behind the
+// harness's allow/deny handshake; ModeAuto runs them unattended. Auto is a
+// deliberate user choice, never a default: this agent runs bash.
+const (
+	ModeAsk  = "ask"
+	ModeAuto = "auto"
+)
 
 // imageAtt mirrors the harness's wire field names for one attachment.
 type imageAtt struct {
@@ -94,6 +103,7 @@ type event struct {
 	Path        string  `json:"path,omitempty"`        // file_diff
 	UnifiedDiff string  `json:"unifiedDiff,omitempty"` // file_diff
 	HistoryLen  int     `json:"historyLen,omitempty"`  // ready: restored messages
+	Mode        string  `json:"mode,omitempty"`        // ready, mode
 }
 
 type usage struct {
@@ -141,6 +151,10 @@ type Runner struct {
 	// sessionAllowed holds tool names the user granted "session" scope;
 	// their later calls skip the gate.
 	sessionAllowed map[string]bool
+	// mode is ModeAsk (gate every side-effecting tool) or ModeAuto (run them
+	// unattended). Written by the stdin loop between turns, read by the turn
+	// goroutine; set_mode is rejected mid-turn so the two never race.
+	mode string
 
 	// noImages latches on once the active endpoint rejects image input
 	// (vision-less model). Images then stay in history — a later switch to a
@@ -168,6 +182,7 @@ func Run(cfg *config.Config, client *llm.Client, projectDir, version string) err
 		out:            os.Stdout,
 		approvals:      map[string]chan approval{},
 		sessionAllowed: map[string]bool{},
+		mode:           ModeAsk, // safe default; the harness opts into auto
 	}
 	r.loadSession()
 	r.emitModels("ready")
@@ -219,6 +234,19 @@ func (r *Runner) dispatch(cmd command) {
 		r.emitModels("models")
 	case "get_models":
 		r.emitModels("models")
+	case "set_mode":
+		if cmd.Mode != ModeAsk && cmd.Mode != ModeAuto {
+			r.emitError("unknown mode: "+cmd.Mode, false)
+			return
+		}
+		// Mid-turn switching would race the turn goroutine's gate checks and
+		// silently change the rules under a pending approval.
+		if r.isBusy() {
+			r.emitError("cannot change permission mode mid-turn", false)
+			return
+		}
+		r.mode = cmd.Mode
+		r.emit(event{V: V, Type: "mode", Mode: r.mode})
 	case "clear":
 		if r.isBusy() {
 			r.emitError("cannot clear mid-turn", false)
@@ -541,10 +569,10 @@ func (r *Runner) activeContextSize() int {
 }
 
 // needsApproval gates side-effecting tools (bash, write_file, edit_file)
-// behind the harness's allow/deny UI. read_file is always safe; a
-// session-scope allow lifts the gate for that tool name for this process.
+// behind the harness's allow/deny UI. read_file is always safe; auto mode
+// and a session-scope allow both lift the gate.
 func (r *Runner) needsApproval(name string) bool {
-	if name == tools.ReadFileName {
+	if name == tools.ReadFileName || r.mode == ModeAuto {
 		return false
 	}
 	return !r.sessionAllowed[name]
@@ -670,6 +698,7 @@ func (r *Runner) emitModels(typ string) {
 	e := event{V: V, Type: typ, Version: r.version, Active: r.cfg.Active, Models: models}
 	if typ == "ready" {
 		e.HistoryLen = len(r.history)
+		e.Mode = r.mode
 	}
 	r.emit(e)
 }
