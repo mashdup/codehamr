@@ -250,6 +250,12 @@ func (r *Runner) runTurn(text string, images []imageAtt) {
 	for _, img := range images {
 		user.Images = append(user.Images, chmctx.Image{MIME: img.MIME, DataB64: img.DataB64})
 	}
+	// Warn on EVERY latched send, not only at latch time: silently stripping
+	// an attachment the user just added reads as "the model is ignoring me".
+	if r.noImages && len(user.Images) > 0 {
+		r.emit(event{V: V, Type: "log", Level: "warn",
+			Message: "attached image(s) NOT sent: this endpoint rejected image input earlier in the session — switch to a vision model (e.g. a *-vl model) to use them"})
+	}
 	preTurnLen := len(r.history)
 	r.history = append(r.history, user)
 
