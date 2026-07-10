@@ -104,10 +104,15 @@ type usage struct {
 // Runner is one headless session: one workspace, one conversation history,
 // one child of the GUI harness.
 type Runner struct {
-	cfg     *config.Config
-	client  *llm.Client
-	system  string
-	version string
+	cfg        *config.Config
+	client     *llm.Client
+	system     string
+	version    string
+	projectDir string
+	// treeText is the current file-tree system-prompt block, refreshed at
+	// each turn start so the model never opens with a discovery `ls -R` and
+	// sees its own writes reflected next turn. Owned by the turn goroutine.
+	treeText string
 
 	outMu sync.Mutex
 	out   io.Writer
@@ -159,6 +164,7 @@ func Run(cfg *config.Config, client *llm.Client, projectDir, version string) err
 		client:         client,
 		system:         config.DefaultSystemPrompt + "\n\nWorking directory: " + projectDir,
 		version:        version,
+		projectDir:     projectDir,
 		out:            os.Stdout,
 		approvals:      map[string]chan approval{},
 		sessionAllowed: map[string]bool{},
@@ -233,6 +239,7 @@ func (r *Runner) dispatch(cmd command) {
 func (r *Runner) runTurn(text string, images []imageAtt) {
 	turnCtx, cancel := context.WithCancel(context.Background())
 	seq := r.installTurn(cancel)
+	r.treeText = buildTreeSection(r.projectDir)
 	// A panic in the turn loop must reach the harness as a readable fatal
 	// error, not kill the process silently mid-session. The stack still goes
 	// to stderr for the post-mortem; the session survives for the next prompt.
@@ -469,9 +476,19 @@ func (r *Runner) recordToolResult(call *chmctx.ToolCall, content string, ok bool
 
 func (r *Runner) buildMessages() []chmctx.Message {
 	budget := chmctx.Budget(r.activeContextSize())
+	sys := r.system
+	// The tree pays for itself out of the history budget (FixedSystem only
+	// reserves for the embedded prompt), and is dropped entirely when it
+	// would eat more than a quarter of a small context's budget.
+	if r.treeText != "" {
+		if tt := chmctx.Tokens(r.treeText); tt*4 < budget {
+			sys += "\n\n" + r.treeText
+			budget -= tt
+		}
+	}
 	packed := chmctx.Pack(r.history, budget)
 	out := make([]chmctx.Message, 0, len(packed.Messages)+1)
-	out = append(out, chmctx.Message{Role: chmctx.RoleSystem, Content: r.system})
+	out = append(out, chmctx.Message{Role: chmctx.RoleSystem, Content: sys})
 	for _, m := range packed.Messages {
 		if r.noImages {
 			m.Images = nil // struct copy; history keeps the attachments
