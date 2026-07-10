@@ -35,17 +35,24 @@ var treeSkipDirs = map[string]bool{
 }
 
 // buildTreeSection returns the system-prompt block describing the project
-// layout, or "" for an effectively empty directory.
+// layout, or "" for an effectively empty directory. The wording deliberately
+// overrides the embedded prompt's investigate-with-ls instruction: without
+// the explicit "do not run ls", models dutifully list the directory anyway
+// (observed live: an opening `ls -F` despite the tree being present).
 func buildTreeSection(root string) string {
 	tree, truncated := buildTree(root)
 	if tree == "" {
 		return ""
 	}
-	note := ""
+	note := "The layout investigation is already done: this Project file tree is refreshed automatically " +
+		"every turn (your own edits included), so do NOT run `ls`, `ls -R`, `find`, or `tree` just to see " +
+		"the structure — go straight to `read_file`/`grep` on the paths below."
 	if truncated {
-		note = " (truncated at " + itoa(treeMaxEntries) + " entries; ls for the rest)"
+		note += " It is truncated at " + itoa(treeMaxEntries) + " entries; list only what lies beyond it."
+	} else {
+		note += " Only directories marked \"(contents omitted)\" need listing if you truly need their contents."
 	}
-	return "Project file tree" + note + ", refreshed each turn — trust it over re-running ls:\n" + tree
+	return note + "\n" + tree
 }
 
 // buildTree walks root breadth-limited and returns an indented listing plus
