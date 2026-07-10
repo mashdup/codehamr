@@ -136,6 +136,14 @@ type Runner struct {
 	// sessionAllowed holds tool names the user granted "session" scope;
 	// their later calls skip the gate.
 	sessionAllowed map[string]bool
+
+	// noImages latches on once the active endpoint rejects image input
+	// (vision-less model). Images then stay in history — a later switch to a
+	// vision model gets them back — but are stripped from the wire, so one
+	// rejected image can't poison every following request. Reset on
+	// set_model: the new endpoint may support vision. Owned by the turn
+	// goroutine except for that idle-time reset, same discipline as client.
+	noImages bool
 }
 
 type approval struct {
@@ -201,6 +209,7 @@ func (r *Runner) dispatch(cmd command) {
 		p := r.cfg.ActiveProfile()
 		r.client = llm.New(r.cfg.ActiveURL(), p.LLM, p.ResolvedKey())
 		r.liveCtxSize = 0 // new endpoint, stale header value no longer applies
+		r.noImages = false
 		r.emitModels("models")
 	case "get_models":
 		r.emitModels("models")
@@ -259,13 +268,24 @@ func (r *Runner) runTurn(text string, images []imageAtt) {
 				r.finishTurn(event{V: V, Type: "turn_done"})
 				return
 			}
+			// Vision-less endpoint rejecting image input: degrade instead of
+			// failing the turn. Latch noImages (buildMessages then strips
+			// images from the wire; history keeps them) and rerun the round.
+			// One-shot by construction: the latch makes this branch
+			// unreachable on the retry. This also self-heals a session
+			// poisoned by an image message saved before the rollback fix.
+			if !r.noImages && historyHasImages(r.history) && isImageRejection(err) {
+				r.noImages = true
+				r.emit(event{V: V, Type: "log", Level: "warn",
+					Message: "this endpoint rejects image input (" + firstLine(err.Error()) + ") — continuing without the attached images; switch to a vision model to use them"})
+				continue
+			}
 			// First-round failure: the model never saw this message, so keep
 			// it out of history — otherwise a message the server rejects
-			// outright (e.g. images sent to a vision-less model: "500: image
-			// input is not supported") is re-sent inside every later request
-			// and poisons the whole session until a manual clear. Rolling
-			// back makes retry-after-fixing clean. Mid-turn failures keep
-			// history: completed rounds really happened.
+			// outright is re-sent inside every later request and poisons the
+			// whole session until a manual clear. Rolling back makes
+			// retry-after-fixing clean. Mid-turn failures keep history:
+			// completed rounds really happened.
 			if rounds == 0 {
 				r.history = r.history[:preTurnLen]
 			}
@@ -446,7 +466,45 @@ func (r *Runner) buildMessages() []chmctx.Message {
 	packed := chmctx.Pack(r.history, budget)
 	out := make([]chmctx.Message, 0, len(packed.Messages)+1)
 	out = append(out, chmctx.Message{Role: chmctx.RoleSystem, Content: r.system})
-	return append(out, packed.Messages...)
+	for _, m := range packed.Messages {
+		if r.noImages {
+			m.Images = nil // struct copy; history keeps the attachments
+		}
+		out = append(out, m)
+	}
+	return out
+}
+
+// historyHasImages reports whether any history message carries attachments —
+// the precondition for reading an endpoint error as an image rejection.
+func historyHasImages(history []chmctx.Message) bool {
+	for i := range history {
+		if len(history[i].Images) > 0 {
+			return true
+		}
+	}
+	return false
+}
+
+// isImageRejection matches the error shapes vision-less OpenAI-compatible
+// servers return for image content. Each needle is the provider's own phrase:
+// llama.cpp/Ollama's "image input is not supported ... provide the mmproj"
+// (observed live) and the "does not support image(s)" family several shims
+// use. Deliberately narrow — a random 500 must fail the turn loudly, not
+// silently strip the user's attachments.
+func isImageRejection(err error) bool {
+	s := strings.ToLower(err.Error())
+	return strings.Contains(s, "image input is not supported") ||
+		strings.Contains(s, "mmproj") ||
+		strings.Contains(s, "does not support image")
+}
+
+// firstLine mirrors llm.firstLine for compact log messages.
+func firstLine(s string) string {
+	if i := strings.IndexAny(s, "\r\n"); i >= 0 {
+		return strings.TrimSpace(s[:i])
+	}
+	return strings.TrimSpace(s)
 }
 
 func (r *Runner) activeContextSize() int {
