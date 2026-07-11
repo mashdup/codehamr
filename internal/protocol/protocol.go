@@ -100,8 +100,9 @@ type event struct {
 	Message string      `json:"message,omitempty"`     // error, log
 	Fatal   *bool       `json:"fatal,omitempty"`       // error
 	Level   string      `json:"level,omitempty"`       // log
-	Path        string  `json:"path,omitempty"`        // file_diff
+	Path        string  `json:"path,omitempty"`        // file_diff, preview
 	UnifiedDiff string  `json:"unifiedDiff,omitempty"` // file_diff
+	URL         string  `json:"url,omitempty"`         // preview
 	HistoryLen  int     `json:"historyLen,omitempty"`  // ready: restored messages
 	Mode        string  `json:"mode,omitempty"`        // ready, mode
 }
@@ -255,6 +256,12 @@ func (r *Runner) dispatch(cmd command) {
 		r.history = nil
 		_ = os.Remove(r.sessionPath())
 		r.emit(event{V: V, Type: "cleared"})
+	case "compact":
+		if !r.tryAcquireTurn() {
+			r.emitError("a turn is already in progress", false)
+			return
+		}
+		go r.runCompact()
 	default:
 		r.emitError(fmt.Sprintf("unknown command type: %q", cmd.Type), false)
 	}
@@ -383,6 +390,130 @@ func (r *Runner) finishTurn(e event) {
 	r.emit(e)
 }
 
+// ---------------------------------------------------------------------------
+// Compact: summarize the conversation into a single message, reclaiming
+// context window on long sessions. Runs as a cancellable turn (busy slot + turn
+// context) so the Stop button and mid-turn guards apply, calling the active
+// model with a summarization prompt over a rendered transcript. On success the
+// whole history is replaced by one summary message and a `compacted` event is
+// emitted; on failure the history is left untouched.
+// ---------------------------------------------------------------------------
+
+const compactSystemPrompt = "You are compacting a coding session to save context window. " +
+	"Summarize the conversation below into a concise but complete brief that lets the coding agent continue seamlessly. " +
+	"Preserve: the user's goals and explicit requirements, key decisions and constraints, files created or modified and the substance of those changes, " +
+	"important code/APIs discovered, commands run and their outcomes, and any unfinished tasks or next steps. " +
+	"Omit pleasantries and repetition. Prefer bullet points. Output only the summary."
+
+// compactedPrefix marks the summary message in history so a human reading
+// session.json (or a later compaction) can tell it apart from a real user turn.
+const compactedPrefix = "[Summary of the earlier conversation, compacted to save context]\n\n"
+
+func (r *Runner) runCompact() {
+	turnCtx, cancel := context.WithCancel(context.Background())
+	seq := r.installTurn(cancel)
+	defer func() {
+		if p := recover(); p != nil {
+			fmt.Fprintf(os.Stderr, "panic in compact: %v\n%s", p, debug.Stack())
+			fatal := true
+			r.finishTurn(event{V: V, Type: "error", Fatal: &fatal,
+				Message: fmt.Sprintf("internal error (panic) during compact: %v", p)})
+		}
+	}()
+	defer r.dropTurn(seq, cancel)
+
+	prevLen := len(r.history)
+	if prevLen == 0 {
+		r.finishTurn(event{V: V, Type: "compacted", HistoryLen: 0, Message: "nothing to compact"})
+		return
+	}
+
+	msgs := []chmctx.Message{
+		{Role: chmctx.RoleSystem, Content: compactSystemPrompt},
+		{Role: chmctx.RoleUser, Content: "Conversation to summarize:\n\n" + r.renderTranscript()},
+	}
+
+	var sb strings.Builder
+	for ev := range r.client.Chat(turnCtx, msgs, nil) {
+		switch ev.Kind {
+		case llm.EventContent:
+			sb.WriteString(ev.Content)
+		case llm.EventError:
+			if turnCtx.Err() != nil {
+				r.finishTurn(event{V: V, Type: "turn_done"})
+				return
+			}
+			nonFatal := false
+			r.finishTurn(event{V: V, Type: "error", Fatal: &nonFatal,
+				Message: "compact failed: " + ev.Err.Error()})
+			return
+		}
+	}
+	if turnCtx.Err() != nil { // cancelled after the stream closed cleanly
+		r.finishTurn(event{V: V, Type: "turn_done"})
+		return
+	}
+
+	summary := strings.TrimSpace(sb.String())
+	if summary == "" {
+		nonFatal := false
+		r.finishTurn(event{V: V, Type: "error", Fatal: &nonFatal,
+			Message: "compact produced an empty summary; conversation left unchanged"})
+		return
+	}
+
+	r.history = []chmctx.Message{{Role: chmctx.RoleUser, Content: compactedPrefix + summary}}
+	r.finishTurn(event{
+		V: V, Type: "compacted",
+		Text:       summary,
+		HistoryLen: len(r.history),
+		Message:    fmt.Sprintf("compacted %d messages into a summary", prevLen),
+	})
+}
+
+// renderTranscript flattens history into a plain-text transcript for the
+// summarizer, capped to roughly fit the active context (keeping the most recent
+// text) so a huge history can't overflow the summarization request itself.
+func (r *Runner) renderTranscript() string {
+	var b strings.Builder
+	for i := range r.history {
+		m := &r.history[i]
+		switch m.Role {
+		case chmctx.RoleUser:
+			b.WriteString("USER: ")
+		case chmctx.RoleAssistant:
+			b.WriteString("ASSISTANT: ")
+		case chmctx.RoleTool:
+			b.WriteString("TOOL[" + m.ToolName + "]: ")
+		default:
+			b.WriteString(strings.ToUpper(string(m.Role)) + ": ")
+		}
+		for _, tc := range m.ToolCalls {
+			args, _ := json.Marshal(tc.Arguments)
+			b.WriteString(fmt.Sprintf("«calls %s(%s)» ", tc.Name, truncateStr(string(args), 300)))
+		}
+		b.WriteString(m.Content)
+		if len(m.Images) > 0 {
+			b.WriteString(" [image attached]")
+		}
+		b.WriteString("\n\n")
+	}
+	s := b.String()
+	// Cap to ~60% of the context (chars ≈ tokens*4) so the summarization request
+	// itself fits; keep the most recent tail, which matters most.
+	if maxChars := r.activeContextSize() * 4 * 6 / 10; maxChars > 0 && len(s) > maxChars {
+		s = "[…earlier conversation truncated…]\n\n" + s[len(s)-maxChars:]
+	}
+	return s
+}
+
+func truncateStr(s string, n int) string {
+	if len(s) <= n {
+		return s
+	}
+	return s[:n] + "…"
+}
+
 // chatRound streams one LLM round, forwarding deltas as events, and returns
 // the final assistant message. The tool calls inside it are executed by the
 // caller; EventToolCall stream events are skipped because Final.ToolCalls
@@ -429,6 +560,11 @@ func (r *Runner) chatRound(turnCtx context.Context) (*chmctx.Message, *usage, er
 // runTool gates, executes, and records one tool call. Returns false when the
 // turn was cancelled while gating or executing.
 func (r *Runner) runTool(turnCtx context.Context, call *chmctx.ToolCall) bool {
+	// Harness-only UI tools short-circuit: no shell, no approval, just an
+	// event the GUI reacts to.
+	if call.Name == previewFileName || call.Name == previewURLName {
+		return r.runPreviewTool(call)
+	}
 	needs := r.needsApproval(call.Name)
 	var decisionCh chan approval
 	if needs {
@@ -578,12 +714,120 @@ func (r *Runner) needsApproval(name string) bool {
 	return !r.sessionAllowed[name]
 }
 
+// ---------------------------------------------------------------------------
+// Preview tools: harness-only, protocol-mode-only. They don't touch the
+// filesystem or shell — they emit a `preview` event the GUI turns into an
+// open preview panel (file viewer or live browser). The TUI never sees them.
+// ---------------------------------------------------------------------------
+
+const (
+	previewFileName = "preview_file"
+	previewURLName  = "preview_url"
+)
+
+// runPreviewTool validates, emits the preview event, and records a synthetic
+// result. Never blocks, never needs approval — the panel is visible and
+// closable, which is the user's control.
+func (r *Runner) runPreviewTool(call *chmctx.ToolCall) bool {
+	needs := false
+	r.emit(event{
+		V: V, Type: "tool_call",
+		CallID: call.ID, Name: call.Name, Args: call.Arguments,
+		NeedsApproval: &needs,
+	})
+	switch call.Name {
+	case previewFileName:
+		p, _ := call.Arguments["path"].(string)
+		abs, err := r.workspacePath(p)
+		if err != nil {
+			r.recordToolResult(call, "("+err.Error()+")", false)
+			return true
+		}
+		if info, err := os.Stat(abs); err != nil || info.IsDir() {
+			r.recordToolResult(call, "(not a previewable file: "+p+")", false)
+			return true
+		}
+		r.emit(event{V: V, Type: "preview", Path: abs})
+		r.recordToolResult(call, "(opened in the user's preview panel)", true)
+	case previewURLName:
+		u, _ := call.Arguments["url"].(string)
+		u = strings.TrimSpace(u)
+		if u == "" {
+			r.recordToolResult(call, "(empty url)", false)
+			return true
+		}
+		if !strings.HasPrefix(u, "http://") && !strings.HasPrefix(u, "https://") {
+			u = "http://" + u // bare localhost:8080 etc.
+		}
+		r.emit(event{V: V, Type: "preview", URL: u})
+		r.recordToolResult(call, "(opened in the user's live browser panel)", true)
+	}
+	return true
+}
+
+// workspacePath resolves p against the project dir and refuses paths that
+// escape it — the preview panel is scoped to the workspace.
+func (r *Runner) workspacePath(p string) (string, error) {
+	if strings.TrimSpace(p) == "" {
+		return "", fmt.Errorf("empty path")
+	}
+	abs := p
+	if !filepath.IsAbs(abs) {
+		abs = filepath.Join(r.projectDir, p)
+	}
+	abs = filepath.Clean(abs)
+	root := filepath.Clean(r.projectDir)
+	if abs != root && !strings.HasPrefix(abs, root+string(filepath.Separator)) {
+		return "", fmt.Errorf("path is outside the workspace")
+	}
+	return abs, nil
+}
+
 func buildTools() []llm.Tool {
 	return []llm.Tool{
 		schemaToTool(tools.BashSchema()),
 		schemaToTool(tools.ReadFileSchema()),
 		schemaToTool(tools.WriteFileSchema()),
 		schemaToTool(tools.EditFileSchema()),
+		{
+			Type: "function",
+			Function: llm.FunctionDef{
+				Name: previewFileName,
+				Description: "Show a workspace file to the USER in the harness's preview panel " +
+					"(code, markdown, images, pdf, docx). Use after creating or changing a file " +
+					"the user should look at, or when they ask to see one. Shows it to the user " +
+					"only — it returns no content to you; use read_file to read.",
+				Parameters: map[string]any{
+					"type": "object",
+					"properties": map[string]any{
+						"path": map[string]any{
+							"type":        "string",
+							"description": "File path, absolute or relative to the working directory.",
+						},
+					},
+					"required": []string{"path"},
+				},
+			},
+		},
+		{
+			Type: "function",
+			Function: llm.FunctionDef{
+				Name: previewURLName,
+				Description: "Open a URL in the USER's live browser panel inside the harness. " +
+					"Use to show a running app or demo — e.g. http://localhost:5173 after starting " +
+					"a dev server. Renders for the user only; nothing is returned to you.",
+				Parameters: map[string]any{
+					"type": "object",
+					"properties": map[string]any{
+						"url": map[string]any{
+							"type":        "string",
+							"description": "URL to open, e.g. http://localhost:8080.",
+						},
+					},
+					"required": []string{"url"},
+				},
+			},
+		},
 	}
 }
 
