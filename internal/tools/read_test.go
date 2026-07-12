@@ -57,7 +57,7 @@ func TestReadFileTruncatesOversizeContent(t *testing.T) {
 }
 
 func TestReadFileSchemaShape(t *testing.T) {
-	sch := ReadFileSchema()
+	sch := readSchema()
 	fn, ok := sch["function"].(map[string]any)
 	if !ok {
 		t.Fatal("missing function")

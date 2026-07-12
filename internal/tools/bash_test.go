@@ -226,6 +226,26 @@ func TestBashBackgroundedChildReturnsCleanOutput(t *testing.T) {
 	}
 }
 
+// TestBashBackgroundedChildIsTagged: a shell that exits 0 while a child holds
+// the pipes open must carry the backgroundNote tag, and WasBackgrounded must
+// detect it - that's the wire signal the protocol driver reads to set the
+// tool_result event's background flag (and the badge in the GUI).
+func TestBashBackgroundedChildIsTagged(t *testing.T) {
+	out := Bash(context.Background(), "echo done && sleep 3 &", 10*time.Second)
+	if !WasBackgrounded(out) {
+		t.Fatalf("backgrounded child not tagged: %q", out)
+	}
+}
+
+// TestWasBackgroundedIgnoresOrdinary: a plain command that exits cleanly must
+// not be flagged, else every bash call badges as backgrounded.
+func TestWasBackgroundedIgnoresOrdinary(t *testing.T) {
+	out := Bash(context.Background(), "echo done", 5*time.Second)
+	if WasBackgrounded(out) {
+		t.Fatalf("ordinary command wrongly tagged as backgrounded: %q", out)
+	}
+}
+
 func TestExecuteBashWrapsResult(t *testing.T) {
 	call := chmctx.ToolCall{
 		ID: "call_1", Name: "bash",

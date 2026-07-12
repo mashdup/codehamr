@@ -300,7 +300,7 @@ func New(cfg *config.Config, cli *llm.Client, projectDir, version string) Model 
 	if dbgEnabled() {
 		dbgWriteSession(version, cfg.Active, cfg.ActiveProfile().LLM, cfg.ActiveURL(),
 			m.activeContextSize(), chmctx.Tokens(m.system),
-			[]string{tools.BashName, tools.ReadFileName, tools.WriteFileName, tools.EditFileName})
+			tools.Names())
 	}
 	// Seed prompt history from .codehamr/history so ↑ recalls prompts from
 	// earlier sessions. Loaded entries carry no chip metadata (the on-disk
@@ -680,16 +680,17 @@ func (m *Model) buildMessages() []chmctx.Message {
 	return out
 }
 
-// buildTools exposes the four local tools every turn: bash, read_file,
-// write_file, edit_file. No loop/control tool; a turn ends when the model
-// stops emitting tool calls (see handleStreamClosed).
+// buildTools exposes every registered local tool each turn (bash, read_file,
+// write_file, edit_file today) in registry order. No loop/control tool; a turn
+// ends when the model stops emitting tool calls (see handleStreamClosed).
+// Registering a new tool in the tools package adds it here automatically.
 func (m *Model) buildTools() []llm.Tool {
-	return []llm.Tool{
-		schemaToTool(tools.BashSchema()),
-		schemaToTool(tools.ReadFileSchema()),
-		schemaToTool(tools.WriteFileSchema()),
-		schemaToTool(tools.EditFileSchema()),
+	schemas := tools.Schemas()
+	out := make([]llm.Tool, len(schemas))
+	for i, s := range schemas {
+		out[i] = schemaToTool(s)
 	}
+	return out
 }
 
 // schemaToTool unwraps a tool schema (the map[string]any shape shared by bash
@@ -1073,66 +1074,19 @@ const nudgeOrigin = "[Automated codehamr check - not a message from your user.] 
 // interrupting honest trial-and-error.
 const maxToolFailStreak = 5
 
-// toolTargetKey is the stable identity used to detect a repeated-failure loop:
-// tool name + its target (the path for file tools, the command's first line for
-// bash). Deliberately NOT the full argument set: a full-args key is defeated by
-// any cosmetic change between retries (a regenerated file body, a reworded
-// command). Keying on the target catches a model hammering the same operation
-// while leaving varied exploration alone.
+// toolTargetKey is the stable identity used to detect a repeated-failure loop
+// (tool name + its target). It delegates to the tools registry, where each tool
+// owns its own key shape, so this driver stays agnostic to how many tools exist.
 func toolTargetKey(call chmctx.ToolCall) string {
-	switch call.Name {
-	case tools.WriteFileName, tools.EditFileName, tools.ReadFileName:
-		path, _ := call.Arguments["path"].(string)
-		return call.Name + "|" + path
-	case tools.BashName:
-		cmd, _ := call.Arguments["cmd"].(string)
-		if i := strings.IndexByte(cmd, '\n'); i >= 0 {
-			cmd = cmd[:i]
-		}
-		return call.Name + "|" + strings.TrimSpace(cmd)
-	}
-	return call.Name
+	return tools.TargetKey(call)
 }
 
 // toolResultFailed reports whether a tool result is an error the model should
-// react to. File tools wrap errors in parens ("(write error: ...)", "(not
-// found: ...)") and report success as plain text ("wrote N bytes"); bash
-// appends "(exit: N)" / "(timeout after ...)" on failure. A user Ctrl+C
-// ("(cancelled)") never counts as a failure.
+// react to. It delegates to the tools registry, where each tool owns its own
+// success/failure shape; router-level failures (truncated args, unknown tool)
+// are handled there too.
 func toolResultFailed(name, result string) bool {
-	if strings.Contains(result, "(cancelled)") {
-		return false
-	}
-	// Router-level failures arrive under any tool name and bypass the per-tool
-	// shapes below: truncated/invalid JSON args (the failure that makes a model
-	// re-emit the same too-large write for minutes) and a hallucinated tool
-	// name. Both must count as failures or the repeated-failure nudge never
-	// fires on exactly the loops it was built for.
-	t := strings.TrimSpace(result)
-	if strings.HasPrefix(t, "(tool arguments were not valid JSON") || strings.HasPrefix(t, "(unknown tool:") {
-		return true
-	}
-	switch name {
-	case tools.WriteFileName, tools.EditFileName:
-		// write/edit report success as plain text ("wrote N bytes", "edited …")
-		// and every error in parens, so a leading "(" is the failure signal.
-		return strings.HasPrefix(t, "(")
-	case tools.ReadFileName:
-		// read_file returns the file's RAW content on success, which can
-		// legitimately start with "(" (Lisp, S-expressions, a leading paren
-		// expr). Match only its two real failure outputs so a successful read
-		// isn't counted as a failure and made to feed the repeated-failure nudge.
-		return strings.HasPrefix(t, "(read error:") || t == "(empty path)"
-	case tools.BashName:
-		// "(empty command)" is bash's malformed-call outcome (missing/blank
-		// cmd), exact-matched like read_file's "(empty path)": successful bash
-		// output can legitimately start with "(", so no prefix match here. It
-		// must count as a failure or a model looping on empty calls never
-		// builds a streak and slips past the backstop to the runaway cap.
-		return strings.Contains(result, "\n(exit: ") || strings.Contains(result, "(timeout after ") ||
-			t == "(empty command)"
-	}
-	return false
+	return tools.ResultFailed(name, result)
 }
 
 // recordToolOutcome updates the failure streak from one finished tool result.

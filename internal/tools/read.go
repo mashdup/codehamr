@@ -1,8 +1,10 @@
 package tools
 
 import (
+	"context"
 	"fmt"
 	"os"
+	"strings"
 
 	chmctx "github.com/codehamr/codehamr/internal/ctx"
 )
@@ -29,10 +31,43 @@ func ReadFile(path string) string {
 	return chmctx.Truncate(string(raw))
 }
 
-// ReadFileSchema is the OpenAI tool definition for read_file. The description
+// readTool is the registry entry for read_file: a side-effect-free tool (Safe,
+// never needs approval) that does not mutate a tracked file.
+type readTool struct{}
+
+func (readTool) Name() string           { return ReadFileName }
+func (readTool) Safe() bool             { return true }
+func (readTool) Mutates() bool          { return false }
+func (readTool) Schema() map[string]any { return readSchema() }
+
+func (readTool) Run(_ context.Context, args map[string]any) string {
+	path, _ := args["path"].(string)
+	return ReadFile(path)
+}
+
+func (readTool) InlineStatus(args map[string]any) string {
+	path, _ := args["path"].(string)
+	return "▶ read_file: " + path
+}
+
+func (readTool) Failed(result string) bool {
+	// read_file returns the file's RAW content on success, which can
+	// legitimately start with "(" (Lisp, S-expressions, a leading paren expr).
+	// Match only its two real failure outputs so a successful read isn't
+	// counted as a failure and made to feed the repeated-failure nudge.
+	t := strings.TrimSpace(result)
+	return strings.HasPrefix(t, "(read error:") || t == "(empty path)"
+}
+
+func (readTool) TargetKey(args map[string]any) string {
+	path, _ := args["path"].(string)
+	return ReadFileName + "|" + path
+}
+
+// readSchema is the OpenAI tool definition for read_file. The description
 // nudges the model toward read_file over `cat` so it stops piping source
 // through the shell just to look at it.
-func ReadFileSchema() map[string]any {
+func readSchema() map[string]any {
 	return map[string]any{
 		"type": "function",
 		"function": map[string]any{

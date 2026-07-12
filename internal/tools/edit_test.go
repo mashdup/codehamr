@@ -217,7 +217,7 @@ func TestInlineStatusEditFile(t *testing.T) {
 }
 
 func TestEditFileSchemaShape(t *testing.T) {
-	sch := EditFileSchema()
+	sch := editSchema()
 	fn, ok := sch["function"].(map[string]any)
 	if !ok {
 		t.Fatal("missing function")

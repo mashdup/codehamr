@@ -31,6 +31,10 @@ const DirName = ".codehamr"
 // stock-Ollama tier and the seeded local model's native window. Users who raise
 // their server's num_ctx (OLLAMA_CONTEXT_LENGTH; see README) lift this to match.
 const defaultContextSize = 32768
+// projectAgentFile is the name of the project-local agent configuration that
+// gets prepended to the system prompt if present.
+const projectAgentFile = "AGENTS.md"
+
 
 // cloudProfileNames are profiles whose context_size the server sets via the
 // X-Context-Window header. We leave their on-disk context_size empty:
@@ -106,6 +110,21 @@ func Default() *Config {
 		Models: models,
 	}
 }
+
+// PrefixedSystemPrompt reads a project-local AGENTS.md from the working directory
+// (if present) and prepends its contents to the embedded system prompt. This lets
+// each repo ship custom agent constraints without touching the binary.
+func PrefixedSystemPrompt() string {
+	if content, err := os.ReadFile(projectAgentFile); err == nil && len(content) > 0 {
+		// Trim trailing newlines and ensure exactly one trailing newline before the embedded prompt.
+		trimmed := strings.TrimSpace(string(content))
+		if trimmed != "" {
+			return trimmed + "\n\n" + DefaultSystemPrompt
+		}
+	}
+	return DefaultSystemPrompt
+}
+
 
 // Bootstrap returns the config for the current project, creating .codehamr/
 // and config.yaml on first use. config.yaml is never overwritten; the prompt

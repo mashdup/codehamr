@@ -10,8 +10,6 @@ import (
 	"strings"
 	"time"
 	"unicode/utf8"
-
-	chmctx "github.com/codehamr/codehamr/internal/ctx"
 )
 
 // Wire-format tool names. One source so schema, router, and inline-status
@@ -27,6 +25,20 @@ const (
 // request, a backstop against runaway loops (`sleep 99999`, `while true`)
 // that would otherwise tie up the turn until Ctrl+C.
 const maxBashTimeoutSeconds = 3600
+
+// backgroundNote is appended to a bash result whose shell exited 0 but left a
+// child holding the output pipes open (`cmd &`, `nohup`). It doubles as the
+// wire signal the protocol driver reads back (WasBackgrounded) to set the
+// tool_result event's background flag, and tells the model the process
+// outlives the turn.
+const backgroundNote = "\n(a background process is still running after the shell exited)"
+
+// WasBackgrounded reports whether a bash result carries the backgroundNote
+// tag. The protocol driver reads it to flag the tool_result; kept here so the
+// tag string has one owner.
+func WasBackgrounded(result string) bool {
+	return strings.Contains(result, backgroundNote)
+}
 
 // Bash runs one shell command through /bin/sh -c and returns combined
 // stdout+stderr. Non-zero exit is not an error; the model sees the failure
@@ -90,9 +102,12 @@ func Bash(parent context.Context, command string, timeout time.Duration) string 
 		case errors.Is(err, exec.ErrWaitDelay):
 			// Shell exited 0; err is non-nil only because a backgrounded child
 			// held the pipes past WaitDelay, not a failure. Return output as-is
-			// so it isn't mislabeled with a spurious (exit: ...). After the
-			// cancel/timeout cases so those signals win over a coincident delay.
-			return s
+			// (no spurious (exit: ...)), but tag it so the harness can badge the
+			// tool card and the model knows the process outlives the turn - on
+			// Windows the process-group kill is a no-op, so it genuinely does.
+			// After the cancel/timeout cases so those signals win over a
+			// coincident delay.
+			return s + backgroundNote
 		default:
 			// Exit errors go into the output, exactly what the model needs.
 			s += fmt.Sprintf("\n(exit: %v)", err)
@@ -101,8 +116,55 @@ func Bash(parent context.Context, command string, timeout time.Duration) string 
 	return s
 }
 
-// BashSchema is the OpenAI tool definition for bash, exposed by every profile.
-func BashSchema() map[string]any {
+// bashTool is the registry entry for bash: a side-effecting shell tool that is
+// gated by approval, does not mutate a tracked file, and reports failure via an
+// appended "(exit: N)" / "(timeout after ...)" marker.
+type bashTool struct{}
+
+func (bashTool) Name() string       { return BashName }
+func (bashTool) Safe() bool         { return false }
+func (bashTool) Mutates() bool      { return false }
+func (bashTool) Schema() map[string]any { return bashSchema() }
+
+func (bashTool) Run(parent context.Context, args map[string]any) string {
+	cmd, _ := args["cmd"].(string)
+	// Default 2m, overridable per call up to 1h. Clamp seconds BEFORE the
+	// Duration multiply: 1e18 would overflow int64 into a negative duration,
+	// and 0.5 would truncate to 0 and cancel before the shell runs, so floor
+	// at 1.
+	timeout := 2 * time.Minute
+	if secs, ok := args["timeout_seconds"].(float64); ok && secs > 0 {
+		secs = min(max(secs, 1), maxBashTimeoutSeconds)
+		timeout = time.Duration(secs) * time.Second
+	}
+	return Bash(parent, cmd, timeout)
+}
+
+func (bashTool) InlineStatus(args map[string]any) string {
+	cmd, _ := args["cmd"].(string)
+	return "▶ bash: " + firstLine(cmd)
+}
+
+func (bashTool) Failed(result string) bool {
+	// "(empty command)" is bash's malformed-call outcome (missing/blank cmd),
+	// exact-matched: successful bash output can legitimately start with "(", so
+	// no prefix match. It must count as a failure or a model looping on empty
+	// calls never builds a streak and slips past the backstop.
+	t := strings.TrimSpace(result)
+	return strings.Contains(result, "\n(exit: ") || strings.Contains(result, "(timeout after ") ||
+		t == "(empty command)"
+}
+
+func (bashTool) TargetKey(args map[string]any) string {
+	cmd, _ := args["cmd"].(string)
+	if i := strings.IndexByte(cmd, '\n'); i >= 0 {
+		cmd = cmd[:i]
+	}
+	return BashName + "|" + strings.TrimSpace(cmd)
+}
+
+// bashSchema is the OpenAI tool definition for bash, exposed by every profile.
+func bashSchema() map[string]any {
 	return map[string]any{
 		"type": "function",
 		"function": map[string]any{
@@ -123,102 +185,6 @@ func BashSchema() map[string]any {
 				"required": []string{"cmd"},
 			},
 		},
-	}
-}
-
-// Execute runs a tool call and returns the (possibly truncated) result ready
-// to be appended to the conversation as a `tool` message.
-func Execute(parent context.Context, call chmctx.ToolCall) chmctx.Message {
-	raw := runRaw(parent, call)
-	return chmctx.Message{
-		Role:       chmctx.RoleTool,
-		Content:    chmctx.Truncate(raw),
-		ToolCallID: call.ID,
-		ToolName:   call.Name,
-	}
-}
-
-func runRaw(parent context.Context, call chmctx.ToolCall) string {
-	// A truncated/oversized tool call leaves llm.resolve()'s _parse_error
-	// sentinel where real args should be. Without this guard the call falls
-	// through to an empty path/cmd and returns a misleading "(empty path)",
-	// hiding that the server cut the arguments at its output-token limit, the
-	// failure that makes a model re-emit the same too-large write for minutes.
-	// Name the real cause and the recovery so it self-corrects in one step.
-	if msg, ok := call.Arguments["_parse_error"].(string); ok {
-		return fmt.Sprintf("(tool arguments were not valid JSON: %s, most likely the "+
-			"content was too large and the server truncated the call at its output-token "+
-			"limit. Do NOT retry the same whole-file write. Build the file in chunks with "+
-			"bash heredoc append: `cat > path <<'EOF'` … `EOF` for the first part, then "+
-			"repeated `cat >> path <<'EOF'` … `EOF` for each next part, then verify with "+
-			"`wc -c path`.)", msg)
-	}
-	switch call.Name {
-	case BashName:
-		cmd, _ := call.Arguments["cmd"].(string)
-		// Default 2m, overridable per call up to 1h. Clamp seconds BEFORE the
-		// Duration multiply: 1e18 would overflow int64 into a negative duration,
-		// and 0.5 would truncate to 0 and cancel before the shell runs, so
-		// floor at 1.
-		timeout := 2 * time.Minute
-		if secs, ok := call.Arguments["timeout_seconds"].(float64); ok && secs > 0 {
-			secs = min(max(secs, 1), maxBashTimeoutSeconds)
-			timeout = time.Duration(secs) * time.Second
-		}
-		return Bash(parent, cmd, timeout)
-	case WriteFileName:
-		path, _ := call.Arguments["path"].(string)
-		// A missing/non-string content (valid JSON, so no _parse_error; schema
-		// `required` is not enforced by open-source backends) must not decode
-		// to "" and silently truncate an existing file to 0 bytes behind a
-		// success-shaped result. An explicit `"content": ""` still writes.
-		content, ok := call.Arguments["content"].(string)
-		if !ok {
-			return `(missing content argument: the call carried no string "content", refusing to write - resend with the full content; an intentionally empty file needs an explicit "content": "")`
-		}
-		return WriteFile(path, content)
-	case EditFileName:
-		path, _ := call.Arguments["path"].(string)
-		oldString, _ := call.Arguments["old_string"].(string)
-		// Same guard as write_file's content: a dropped new_string must not
-		// decode to "" and silently delete the matched text. An explicit
-		// `"new_string": ""` still deletes.
-		newString, ok := call.Arguments["new_string"].(string)
-		if !ok {
-			return `(missing new_string argument: the call carried no string "new_string", refusing to edit - resend it; deleting the match needs an explicit "new_string": "")`
-		}
-		return EditFile(path, oldString, newString)
-	case ReadFileName:
-		path, _ := call.Arguments["path"].(string)
-		return ReadFile(path)
-	default:
-		return fmt.Sprintf("(unknown tool: %s)", call.Name)
-	}
-}
-
-// InlineStatus is the one-liner the TUI prints per tool call.
-func InlineStatus(call chmctx.ToolCall) string {
-	switch call.Name {
-	case BashName:
-		cmd, _ := call.Arguments["cmd"].(string)
-		return "▶ bash: " + firstLine(cmd)
-	case WriteFileName:
-		path, _ := call.Arguments["path"].(string)
-		return "▶ write_file: " + path
-	case EditFileName:
-		path, _ := call.Arguments["path"].(string)
-		return "▶ edit_file: " + path
-	case ReadFileName:
-		path, _ := call.Arguments["path"].(string)
-		return "▶ read_file: " + path
-	default:
-		// Fall back to the first non-empty string arg.
-		for _, v := range call.Arguments {
-			if s, ok := v.(string); ok && s != "" {
-				return fmt.Sprintf("▶ %s: %s", call.Name, firstLine(s))
-			}
-		}
-		return "▶ " + call.Name
 	}
 }
 

@@ -47,15 +47,15 @@ const maxCommandLine = 32 << 20
 // command is every client→agent line, one flat struct: with a handful of
 // small variants, a tagged union isn't worth the decode ceremony.
 type command struct {
-	V        int         `json:"v"`
-	Type     string      `json:"type"`
-	Text     string      `json:"text,omitempty"`     // prompt
-	Images   []imageAtt  `json:"images,omitempty"`   // prompt
-	CallID   string      `json:"callId,omitempty"`   // approve
-	Decision string      `json:"decision,omitempty"` // approve: allow|deny
-	Scope    string      `json:"scope,omitempty"`    // approve: once|session
-	Name     string      `json:"name,omitempty"`     // set_model
-	Mode     string      `json:"mode,omitempty"`     // set_mode: ask|auto
+	V        int        `json:"v"`
+	Type     string     `json:"type"`
+	Text     string     `json:"text,omitempty"`     // prompt
+	Images   []imageAtt `json:"images,omitempty"`   // prompt
+	CallID   string     `json:"callId,omitempty"`   // approve
+	Decision string     `json:"decision,omitempty"` // approve: allow|deny
+	Scope    string     `json:"scope,omitempty"`    // approve: once|session
+	Name     string     `json:"name,omitempty"`     // set_model
+	Mode     string     `json:"mode,omitempty"`     // set_mode: ask|auto
 }
 
 // Permission modes. ModeAsk gates every side-effecting tool behind the
@@ -84,32 +84,38 @@ type modelInfo struct {
 // event is every agent→client line, one flat struct with omitempty so each
 // type serializes only its own fields, mirroring command's shape choice.
 type event struct {
-	V       int         `json:"v"`
-	Type    string      `json:"type"`
-	Version string      `json:"version,omitempty"`     // ready
-	Active  string      `json:"activeModel,omitempty"` // ready, models
-	Models  []modelInfo `json:"models,omitempty"`      // ready, models
-	Text    string      `json:"text,omitempty"`        // assistant_delta, reasoning_delta
-	CallID  string      `json:"callId,omitempty"`      // tool_call, tool_result
-	Name    string      `json:"name,omitempty"`        // tool_call
-	Args    map[string]any `json:"args,omitempty"`     // tool_call
-	NeedsApproval *bool  `json:"needsApproval,omitempty"` // tool_call
-	OK      *bool       `json:"ok,omitempty"`          // tool_result
-	Output  *string     `json:"output,omitempty"`      // tool_result
-	Usage   *usage      `json:"usage,omitempty"`       // turn_done
-	Message string      `json:"message,omitempty"`     // error, log
-	Fatal   *bool       `json:"fatal,omitempty"`       // error
-	Level   string      `json:"level,omitempty"`       // log
-	Path        string  `json:"path,omitempty"`        // file_diff, preview
-	UnifiedDiff string  `json:"unifiedDiff,omitempty"` // file_diff
-	URL         string  `json:"url,omitempty"`         // preview
-	HistoryLen  int     `json:"historyLen,omitempty"`  // ready: restored messages
-	Mode        string  `json:"mode,omitempty"`        // ready, mode
+	V             int            `json:"v"`
+	Type          string         `json:"type"`
+	Version       string         `json:"version,omitempty"`       // ready
+	Active        string         `json:"activeModel,omitempty"`   // ready, models
+	Models        []modelInfo    `json:"models,omitempty"`        // ready, models
+	Text          string         `json:"text,omitempty"`          // assistant_delta, reasoning_delta
+	CallID        string         `json:"callId,omitempty"`        // tool_call, tool_result
+	Name          string         `json:"name,omitempty"`          // tool_call
+	Args          map[string]any `json:"args,omitempty"`          // tool_call
+	NeedsApproval *bool          `json:"needsApproval,omitempty"` // tool_call
+	OK            *bool          `json:"ok,omitempty"`            // tool_result
+	Background    *bool          `json:"background,omitempty"`    // tool_result: bash left a process running
+	Output        *string        `json:"output,omitempty"`        // tool_result
+	Usage         *usage         `json:"usage,omitempty"`         // turn_done
+	Message       string         `json:"message,omitempty"`       // error, log
+	Fatal         *bool          `json:"fatal,omitempty"`         // error
+	Level         string         `json:"level,omitempty"`         // log
+	Path          string         `json:"path,omitempty"`          // file_diff, preview
+	UnifiedDiff   string         `json:"unifiedDiff,omitempty"`   // file_diff
+	URL           string         `json:"url,omitempty"`           // preview
+	HistoryLen    int            `json:"historyLen,omitempty"`    // ready: restored messages
+	Mode          string         `json:"mode,omitempty"`          // ready, mode
 }
 
 type usage struct {
 	PromptTokens     int `json:"promptTokens"`
 	CompletionTokens int `json:"completionTokens"`
+	// ContextWindow is the effective window the agent packs against for this
+	// turn (server header value, config context_size, or fallback). Sent so the
+	// harness's context meter has a denominator even for server-managed
+	// profiles whose config omits context_size. Set at turn_done.
+	ContextWindow int `json:"contextWindow,omitempty"`
 }
 
 // Runner is one headless session: one workspace, one conversation history,
@@ -314,6 +320,9 @@ func (r *Runner) runTurn(text string, images []imageAtt) {
 	for {
 		final, u, err := r.chatRound(turnCtx)
 		if u != nil {
+			// Stamp the effective window so the harness's context meter has a
+			// denominator even when the config profile omits context_size.
+			u.ContextWindow = r.activeContextSize()
 			lastUsage = u
 		}
 		if err != nil {
@@ -357,55 +366,55 @@ func (r *Runner) runTurn(text string, images []imageAtt) {
 			r.finishTurn(event{V: V, Type: "turn_done", Usage: lastUsage})
 			return
 		}
-			for i := range final.ToolCalls {
-				call := &final.ToolCalls[i]
-				if !r.runTool(turnCtx, call) {
-					r.finishTurn(event{V: V, Type: "turn_done"})
-					return // cancelled mid-dispatch
-				}
-				toolRounds++
-				// Classify the just-recorded result (last history message) and track a
-				// same-target failure streak — the weak-model loop this backstop exists
-				// for. A user’s denial does not count.
-				failed := false
-				if n := len(r.history); n > 0 {
-					rc := r.history[n-1].Content
-					failed = !strings.HasPrefix(strings.TrimSpace(rc), "(denied") &&
-						toolResultFailed(call.Name, rc)
-				}
-				if failed {
-					if k := toolTargetKey(*call); k == failKey && failKey != "" {
-						failStreak++
-					} else {
-						failKey, failStreak = k, 1
-					}
+		for i := range final.ToolCalls {
+			call := &final.ToolCalls[i]
+			if !r.runTool(turnCtx, call) {
+				r.finishTurn(event{V: V, Type: "turn_done"})
+				return // cancelled mid-dispatch
+			}
+			toolRounds++
+			// Classify the just-recorded result (last history message) and track a
+			// same-target failure streak — the weak-model loop this backstop exists
+			// for. A user’s denial does not count.
+			failed := false
+			if n := len(r.history); n > 0 {
+				rc := r.history[n-1].Content
+				failed = !strings.HasPrefix(strings.TrimSpace(rc), "(denied") &&
+					toolResultFailed(call.Name, rc)
+			}
+			if failed {
+				if k := toolTargetKey(*call); k == failKey && failKey != "" {
+					failStreak++
 				} else {
-					failKey, failStreak = "", 0
+					failKey, failStreak = k, 1
 				}
-				if failStreak >= maxToolFailStreak {
-					failNudges++
-					if failNudges >= maxFailNudges {
-						nonFatal := false
-						r.finishTurn(event{V: V, Type: "error", Fatal: &nonFatal,
-							Message: "stopped: the model kept repeating the same failing tool call and did not recover after a nudge — read the tool error above, or try a stronger model."})
-						return
-					}
-					r.history = append(r.history, chmctx.Message{Role: chmctx.RoleSystem, Content: failNudgeText(failStreak)})
-					failKey, failStreak = "", 0
+			} else {
+				failKey, failStreak = "", 0
+			}
+			if failStreak >= maxToolFailStreak {
+				failNudges++
+				if failNudges >= maxFailNudges {
+					nonFatal := false
+					r.finishTurn(event{V: V, Type: "error", Fatal: &nonFatal,
+						Message: "stopped: the model kept repeating the same failing tool call and did not recover after a nudge — read the tool error above, or try a stronger model."})
+					return
 				}
+				r.history = append(r.history, chmctx.Message{Role: chmctx.RoleSystem, Content: failNudgeText(failStreak)})
+				failKey, failStreak = "", 0
 			}
-			// Runaway backstop for turns that never finish even as the failing target
-			// varies (so the same-target streak keeps resetting).
-			if !runawayNudged && toolRounds >= maxToolRounds {
-				runawayNudged = true
-				r.history = append(r.history, chmctx.Message{Role: chmctx.RoleSystem, Content: runawayNudgeText(toolRounds)})
-			}
-			if toolRounds >= maxToolRoundsHard {
-				nonFatal := false
-				r.finishTurn(event{V: V, Type: "error", Fatal: &nonFatal,
-					Message: fmt.Sprintf("stopped: %d tool calls this turn without finishing — likely stuck in a loop. Try a stronger model or a more specific prompt.", toolRounds)})
-				return
-			}
+		}
+		// Runaway backstop for turns that never finish even as the failing target
+		// varies (so the same-target streak keeps resetting).
+		if !runawayNudged && toolRounds >= maxToolRounds {
+			runawayNudged = true
+			r.history = append(r.history, chmctx.Message{Role: chmctx.RoleSystem, Content: runawayNudgeText(toolRounds)})
+		}
+		if toolRounds >= maxToolRoundsHard {
+			nonFatal := false
+			r.finishTurn(event{V: V, Type: "error", Fatal: &nonFatal,
+				Message: fmt.Sprintf("stopped: %d tool calls this turn without finishing — likely stuck in a loop. Try a stronger model or a more specific prompt.", toolRounds)})
+			return
+		}
 	}
 }
 
@@ -646,7 +655,7 @@ func (r *Runner) runTool(turnCtx context.Context, call *chmctx.ToolCall) bool {
 	// Snapshot the target before a mutating file tool runs so a diff can be
 	// emitted after: the harness renders it inline in the tool card.
 	var diffPath, diffBefore string
-	if call.Name == tools.WriteFileName || call.Name == tools.EditFileName {
+	if tools.Mutates(call.Name) {
 		if p, _ := call.Arguments["path"].(string); p != "" {
 			diffPath = p
 			if b, err := os.ReadFile(p); err == nil {
@@ -664,7 +673,12 @@ func (r *Runner) runTool(turnCtx context.Context, call *chmctx.ToolCall) bool {
 	}
 	r.history = append(r.history, result)
 	ok := !toolResultFailed(call.Name, result.Content)
-	r.emit(event{V: V, Type: "tool_result", CallID: call.ID, OK: &ok, Output: &result.Content})
+	te := event{V: V, Type: "tool_result", CallID: call.ID, OK: &ok, Output: &result.Content}
+	if call.Name == tools.BashName && tools.WasBackgrounded(result.Content) {
+		bg := true
+		te.Background = &bg
+	}
+	r.emit(te)
 	if ok && diffPath != "" {
 		var after string
 		if b, err := os.ReadFile(diffPath); err == nil {
@@ -756,10 +770,10 @@ func (r *Runner) activeContextSize() int {
 }
 
 // needsApproval gates side-effecting tools (bash, write_file, edit_file)
-// behind the harness's allow/deny UI. read_file is always safe; auto mode
-// and a session-scope allow both lift the gate.
+// behind the harness's allow/deny UI. A tool the registry marks Safe
+// (read_file) never gates; auto mode and a session-scope allow both lift it.
 func (r *Runner) needsApproval(name string) bool {
-	if name == tools.ReadFileName || r.mode == ModeAuto {
+	if tools.Safe(name) || r.mode == ModeAuto {
 		return false
 	}
 	return !r.sessionAllowed[name]
@@ -835,12 +849,16 @@ func (r *Runner) workspacePath(p string) (string, error) {
 }
 
 func buildTools() []llm.Tool {
-	return []llm.Tool{
-		schemaToTool(tools.BashSchema()),
-		schemaToTool(tools.ReadFileSchema()),
-		schemaToTool(tools.WriteFileSchema()),
-		schemaToTool(tools.EditFileSchema()),
-		{
+	// Registry tools first (bash, read_file, write_file, edit_file today), in
+	// registry order — a new local tool joins automatically. The two preview
+	// tools are harness-only and appended after.
+	schemas := tools.Schemas()
+	out := make([]llm.Tool, 0, len(schemas)+2)
+	for _, s := range schemas {
+		out = append(out, schemaToTool(s))
+	}
+	out = append(out,
+		llm.Tool{
 			Type: "function",
 			Function: llm.FunctionDef{
 				Name: previewFileName,
@@ -860,7 +878,7 @@ func buildTools() []llm.Tool {
 				},
 			},
 		},
-		{
+		llm.Tool{
 			Type: "function",
 			Function: llm.FunctionDef{
 				Name: previewURLName,
@@ -879,7 +897,8 @@ func buildTools() []llm.Tool {
 				},
 			},
 		},
-	}
+	)
+	return out
 }
 
 // schemaToTool mirrors tui.schemaToTool: unwrap the shared map-shaped schema
@@ -909,22 +928,10 @@ const (
 
 const nudgeOrigin = "[Automated codehamr check - not a message from your user.] "
 
-// toolTargetKey mirrors tui.toolTargetKey: the identity a repeated-failure loop
-// is detected on — tool name + its target (path for file tools, the command's
-// first line for bash), not the full args (a cosmetic retry change defeats that).
+// toolTargetKey delegates to the tools registry for the identity a repeated-
+// failure loop is detected on; each tool owns its own key shape there.
 func toolTargetKey(call chmctx.ToolCall) string {
-	switch call.Name {
-	case tools.WriteFileName, tools.EditFileName, tools.ReadFileName:
-		path, _ := call.Arguments["path"].(string)
-		return call.Name + "|" + path
-	case tools.BashName:
-		cmd, _ := call.Arguments["cmd"].(string)
-		if i := strings.IndexByte(cmd, '\n'); i >= 0 {
-			cmd = cmd[:i]
-		}
-		return call.Name + "|" + strings.TrimSpace(cmd)
-	}
-	return call.Name
+	return tools.TargetKey(call)
 }
 
 func failNudgeText(streak int) string {
@@ -939,27 +946,10 @@ func runawayNudgeText(rounds int) string {
 		rounds)
 }
 
-// toolResultFailed mirrors tui.toolResultFailed's per-tool failure shapes; see
-// that function for the full rationale. Kept in sync by hand: both read the
-// same tool output contracts (parenthesised errors, bash exit markers).
+// toolResultFailed delegates to the tools registry, where each tool owns its
+// own success/failure shape and router-level failures are handled once.
 func toolResultFailed(name, result string) bool {
-	if strings.Contains(result, "(cancelled)") {
-		return false
-	}
-	t := strings.TrimSpace(result)
-	if strings.HasPrefix(t, "(tool arguments were not valid JSON") || strings.HasPrefix(t, "(unknown tool:") {
-		return true
-	}
-	switch name {
-	case tools.WriteFileName, tools.EditFileName:
-		return strings.HasPrefix(t, "(")
-	case tools.ReadFileName:
-		return strings.HasPrefix(t, "(read error:") || t == "(empty path)"
-	case tools.BashName:
-		return strings.Contains(result, "\n(exit: ") || strings.Contains(result, "(timeout after ") ||
-			t == "(empty command)"
-	}
-	return false
+	return tools.ResultFailed(name, result)
 }
 
 // ---------------------------------------------------------------------------

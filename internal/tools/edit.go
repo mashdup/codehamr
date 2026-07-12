@@ -1,6 +1,7 @@
 package tools
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"strings"
@@ -70,10 +71,49 @@ func differsOnlyInWhitespace(content, oldString string) bool {
 	return strings.Count(norm(content), norm(oldString)) == 1
 }
 
-// EditFileSchema is the OpenAI tool definition for edit_file. The description
+// editTool is the registry entry for edit_file: a side-effecting tool gated by
+// approval that mutates the file at args["path"] (so the driver snapshots a
+// diff around it).
+type editTool struct{}
+
+func (editTool) Name() string           { return EditFileName }
+func (editTool) Safe() bool             { return false }
+func (editTool) Mutates() bool          { return true }
+func (editTool) Schema() map[string]any { return editSchema() }
+
+func (editTool) Run(_ context.Context, args map[string]any) string {
+	path, _ := args["path"].(string)
+	oldString, _ := args["old_string"].(string)
+	// Same guard as write_file's content: a dropped new_string must not decode
+	// to "" and silently delete the matched text. An explicit `"new_string":
+	// ""` still deletes.
+	newString, ok := args["new_string"].(string)
+	if !ok {
+		return `(missing new_string argument: the call carried no string "new_string", refusing to edit - resend it; deleting the match needs an explicit "new_string": "")`
+	}
+	return EditFile(path, oldString, newString)
+}
+
+func (editTool) InlineStatus(args map[string]any) string {
+	path, _ := args["path"].(string)
+	return "▶ edit_file: " + path
+}
+
+func (editTool) Failed(result string) bool {
+	// edit reports success as plain text ("edited …") and every error in
+	// parens, so a leading "(" is the failure signal.
+	return strings.HasPrefix(strings.TrimSpace(result), "(")
+}
+
+func (editTool) TargetKey(args map[string]any) string {
+	path, _ := args["path"].(string)
+	return EditFileName + "|" + path
+}
+
+// editSchema is the OpenAI tool definition for edit_file. The description
 // steers the model toward edit_file over write_file for small changes so it
 // stops rewriting whole documents to fix a typo.
-func EditFileSchema() map[string]any {
+func editSchema() map[string]any {
 	return map[string]any{
 		"type": "function",
 		"function": map[string]any{
