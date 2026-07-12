@@ -303,6 +303,14 @@ func (r *Runner) runTurn(text string, images []imageAtt) {
 
 	var lastUsage *usage
 	rounds := 0
+	// Loop backstops — the TUI has these; the GUI driver deliberately shipped
+	// without them, so a weak model could hammer a failing tool for 30+ minutes
+	// until the user hit Cancel. Halt with a clear error instead.
+	toolRounds := 0
+	failKey := ""
+	failStreak := 0
+	failNudges := 0
+	runawayNudged := false
 	for {
 		final, u, err := r.chatRound(turnCtx)
 		if u != nil {
@@ -349,12 +357,55 @@ func (r *Runner) runTurn(text string, images []imageAtt) {
 			r.finishTurn(event{V: V, Type: "turn_done", Usage: lastUsage})
 			return
 		}
-		for i := range final.ToolCalls {
-			if !r.runTool(turnCtx, &final.ToolCalls[i]) {
-				r.finishTurn(event{V: V, Type: "turn_done"})
-				return // cancelled mid-dispatch
+			for i := range final.ToolCalls {
+				call := &final.ToolCalls[i]
+				if !r.runTool(turnCtx, call) {
+					r.finishTurn(event{V: V, Type: "turn_done"})
+					return // cancelled mid-dispatch
+				}
+				toolRounds++
+				// Classify the just-recorded result (last history message) and track a
+				// same-target failure streak — the weak-model loop this backstop exists
+				// for. A user’s denial does not count.
+				failed := false
+				if n := len(r.history); n > 0 {
+					rc := r.history[n-1].Content
+					failed = !strings.HasPrefix(strings.TrimSpace(rc), "(denied") &&
+						toolResultFailed(call.Name, rc)
+				}
+				if failed {
+					if k := toolTargetKey(*call); k == failKey && failKey != "" {
+						failStreak++
+					} else {
+						failKey, failStreak = k, 1
+					}
+				} else {
+					failKey, failStreak = "", 0
+				}
+				if failStreak >= maxToolFailStreak {
+					failNudges++
+					if failNudges >= maxFailNudges {
+						nonFatal := false
+						r.finishTurn(event{V: V, Type: "error", Fatal: &nonFatal,
+							Message: "stopped: the model kept repeating the same failing tool call and did not recover after a nudge — read the tool error above, or try a stronger model."})
+						return
+					}
+					r.history = append(r.history, chmctx.Message{Role: chmctx.RoleSystem, Content: failNudgeText(failStreak)})
+					failKey, failStreak = "", 0
+				}
 			}
-		}
+			// Runaway backstop for turns that never finish even as the failing target
+			// varies (so the same-target streak keeps resetting).
+			if !runawayNudged && toolRounds >= maxToolRounds {
+				runawayNudged = true
+				r.history = append(r.history, chmctx.Message{Role: chmctx.RoleSystem, Content: runawayNudgeText(toolRounds)})
+			}
+			if toolRounds >= maxToolRoundsHard {
+				nonFatal := false
+				r.finishTurn(event{V: V, Type: "error", Fatal: &nonFatal,
+					Message: fmt.Sprintf("stopped: %d tool calls this turn without finishing — likely stuck in a loop. Try a stronger model or a more specific prompt.", toolRounds)})
+				return
+			}
 	}
 }
 
@@ -843,6 +894,49 @@ func schemaToTool(s map[string]any) llm.Tool {
 			Parameters:  fn["parameters"].(map[string]any),
 		},
 	}
+}
+
+// --- Loop backstops: nudge, then halt, a weak model stuck repeating a failing
+// tool. The TUI has richer versions; the GUI driver shipped without any, so a
+// loop ran until the user cancelled. -----------------------------------------
+
+const (
+	maxToolFailStreak = 5   // same-target failures before a nudge (matches the TUI)
+	maxFailNudges     = 2   // failure nudges that do not help → halt the turn
+	maxToolRounds     = 75  // tool calls before the runaway nudge (matches the TUI)
+	maxToolRoundsHard = 150 // absolute per-turn tool-call cap → halt the turn
+)
+
+const nudgeOrigin = "[Automated codehamr check - not a message from your user.] "
+
+// toolTargetKey mirrors tui.toolTargetKey: the identity a repeated-failure loop
+// is detected on — tool name + its target (path for file tools, the command's
+// first line for bash), not the full args (a cosmetic retry change defeats that).
+func toolTargetKey(call chmctx.ToolCall) string {
+	switch call.Name {
+	case tools.WriteFileName, tools.EditFileName, tools.ReadFileName:
+		path, _ := call.Arguments["path"].(string)
+		return call.Name + "|" + path
+	case tools.BashName:
+		cmd, _ := call.Arguments["cmd"].(string)
+		if i := strings.IndexByte(cmd, '\n'); i >= 0 {
+			cmd = cmd[:i]
+		}
+		return call.Name + "|" + strings.TrimSpace(cmd)
+	}
+	return call.Name
+}
+
+func failNudgeText(streak int) string {
+	return nudgeOrigin + fmt.Sprintf(
+		"The last %d tool calls to the same target failed the same way. Stop repeating it - read the error, change your approach, or tell the user what's blocking you.",
+		streak)
+}
+
+func runawayNudgeText(rounds int) string {
+	return nudgeOrigin + fmt.Sprintf(
+		"%d tool calls so far this turn without finishing. If you're still making real progress, keep going. If you're repeating a step that can't work here - a blocked install, a missing tool, a path failing the same way - stop chasing it; verify another way or tell the user what's blocking you.",
+		rounds)
 }
 
 // toolResultFailed mirrors tui.toolResultFailed's per-tool failure shapes; see

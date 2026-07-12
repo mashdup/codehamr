@@ -24,6 +24,16 @@ var shellErr error
 
 func shellPath() (string, error) {
 	shellOnce.Do(func() {
+		// The GUI harness bundles its own POSIX shell (busybox-w32 shipped as
+		// sh.exe) and points here via CODEHAMR_SHELL, so a packaged app needs no
+		// Git for Windows. Honoured first; the Git-Bash probing below stays as the
+		// fallback for the TUI, a bare `codehamr` on PATH, or an absent bundle.
+		if p := os.Getenv("CODEHAMR_SHELL"); p != "" {
+			if st, err := os.Stat(p); err == nil && !st.IsDir() {
+				shellExe = p
+				return
+			}
+		}
 		var candidates []string
 		for _, env := range []string{"ProgramFiles", "ProgramFiles(x86)", "LocalAppData"} {
 			if base := os.Getenv(env); base != "" {

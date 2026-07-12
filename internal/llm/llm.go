@@ -23,6 +23,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"strconv"
 	"strings"
@@ -230,6 +231,11 @@ func idleTimeoutFromEnv() time.Duration {
 
 type Client struct {
 	BaseURL string
+	// ChatURL is the resolved chat-completions endpoint. A bare host gets the
+	// conventional /v1/chat/completions; a base that already carries a path (a
+	// provider not rooted at /v1, e.g. .../api/paas/v4) has only /chat/completions
+	// appended, so a custom endpoint's own path is honoured.
+	ChatURL string
 	Model   string
 	Token   string // optional; empty = no Authorization header
 	HTTP    *http.Client
@@ -258,11 +264,25 @@ type Client struct {
 func New(base, model, token string) *Client {
 	return &Client{
 		BaseURL:     strings.TrimRight(base, "/"),
+		ChatURL:     chatCompletionsURL(base),
 		Model:       model,
 		Token:       token,
 		HTTP:        &http.Client{},
 		IdleTimeout: idleTimeoutFromEnv(),
 	}
+}
+
+// chatCompletionsURL resolves the chat-completions endpoint from a configured
+// base. A bare host (no path) gets the conventional /v1/chat/completions; a base
+// that already carries a path (e.g. a provider rooted at /api/paas/v4 rather
+// than /v1) has only /chat/completions appended, so the custom path is honoured
+// instead of the hardcoded /v1 fighting it (the Z.ai-style 404).
+func chatCompletionsURL(base string) string {
+	base = strings.TrimRight(base, "/")
+	if u, err := url.Parse(base); err == nil && strings.Trim(u.Path, "/") != "" {
+		return base + "/chat/completions"
+	}
+	return base + "/v1/chat/completions"
 }
 
 // ProbeResult holds what Probe extracts from a one-shot hello request: the
@@ -423,7 +443,7 @@ func (c *Client) doPost(parent context.Context, body chatRequest) (*http.Respons
 	if err != nil {
 		return nil, cloud.BudgetStatus{}, nil, err
 	}
-	req, err := http.NewRequestWithContext(parent, "POST", c.BaseURL+"/v1/chat/completions", bytes.NewReader(buf))
+	req, err := http.NewRequestWithContext(parent, "POST", c.ChatURL, bytes.NewReader(buf))
 	if err != nil {
 		return nil, cloud.BudgetStatus{}, nil, err
 	}
