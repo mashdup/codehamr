@@ -169,7 +169,7 @@ func bashSchema() map[string]any {
 		"type": "function",
 		"function": map[string]any{
 			"name":        BashName,
-			"description": "Run a shell command in the user's environment. Combined stdout+stderr is returned. Use targeted commands (grep, head, tail) to avoid the 6k truncation.",
+			"description": "Run a shell command in the user's environment. Combined stdout+stderr is returned. Use targeted commands (head, tail, wc) to avoid the 6k truncation. For searching code use the `grep`/`glob` tools, not `grep -r`/`find` here; for reading a file use `read_file`.",
 			"parameters": map[string]any{
 				"type": "object",
 				"properties": map[string]any{

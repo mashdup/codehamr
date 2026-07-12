@@ -66,13 +66,19 @@ func Register(t Tool) {
 }
 
 // init wires the built-in tools in payload order: bash, read_file, write_file,
-// edit_file. This is the single registration site — the "one line per tool"
-// the interface buys. A new tool adds its file plus one Register call here.
+// edit_file, multi_edit, glob, grep, web_fetch, todo_write. This is the single
+// registration site — the "one line per tool" the interface buys. A new tool
+// adds its file plus one Register call here.
 func init() {
 	Register(bashTool{})
 	Register(readTool{})
 	Register(writeTool{})
 	Register(editTool{})
+	Register(multiEditTool{})
+	Register(globTool{})
+	Register(grepTool{})
+	Register(webFetchTool{})
+	Register(todoWriteTool{})
 }
 
 // Lookup returns the registered tool for a wire name.
