@@ -5,7 +5,9 @@ package config
 
 import (
 	"bytes"
+	"crypto/sha256"
 	_ "embed"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"maps"
@@ -13,6 +15,7 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"time"
 
 	"gopkg.in/yaml.v3"
 )
@@ -31,10 +34,23 @@ const DirName = ".codehamr"
 // stock-Ollama tier and the seeded local model's native window. Users who raise
 // their server's num_ctx (OLLAMA_CONTEXT_LENGTH; see README) lift this to match.
 const defaultContextSize = 32768
-// projectAgentFile is the name of the project-local agent configuration that
-// gets prepended to the system prompt if present.
-const projectAgentFile = "AGENTS.md"
 
+// Project memory: durable, per-project facts the agent accumulates across
+// chats. Kept OUT of the user's repo (in the OS user-config dir, keyed by a
+// hash of the project's absolute path) so it never dirties git or litters the
+// workspace, and loaded into the system prompt of every new session so the
+// agent "remembers" what it learned across chats. The desktop UI can
+// view/download/replace this file; the `remember` tool appends to it.
+const (
+	// memorySendCapBytes bounds how much memory is prepended to the system
+	// prompt. It MUST stay in lockstep with ctx.FixedMemory (a test pins that
+	// the reserved token budget covers this cap plus the preamble): raise one
+	// without the other and packing silently over-fills the real context window.
+	memorySendCapBytes = 6000
+	// memoryFileMaxBytes caps the on-disk file so unbounded appends can't grow
+	// it forever. Oldest lines are trimmed past this on write; newest facts win.
+	memoryFileMaxBytes = 24000
+)
 
 // cloudProfileNames are profiles whose context_size the server sets via the
 // X-Context-Window header. We leave their on-disk context_size empty:
@@ -111,20 +127,129 @@ func Default() *Config {
 	}
 }
 
-// PrefixedSystemPrompt reads a project-local AGENTS.md from the working directory
-// (if present) and prepends its contents to the embedded system prompt. This lets
-// each repo ship custom agent constraints without touching the binary.
-func PrefixedSystemPrompt() string {
-	if content, err := os.ReadFile(projectAgentFile); err == nil && len(content) > 0 {
-		// Trim trailing newlines and ensure exactly one trailing newline before the embedded prompt.
-		trimmed := strings.TrimSpace(string(content))
-		if trimmed != "" {
-			return trimmed + "\n\n" + DefaultSystemPrompt
-		}
+// memoryPreamble labels the project-memory block prepended to the system
+// prompt so the model treats it as accumulated project knowledge, not a fresh
+// instruction, and knows the `remember` tool is what grows it.
+const memoryPreamble = "## Project memory\n" +
+	"Durable facts you have learned about THIS project across previous chats, " +
+	"loaded from persistent storage outside the repo. Trust it as ground truth, " +
+	"keep using it, and be PROACTIVE about growing it: whenever the user states " +
+	"or you discover a durable fact (a build/test command, where a subsystem " +
+	"lives, a project convention, the tech stack, how it's deployed or run, a " +
+	"gotcha, a stated preference), call the `remember` tool that same turn so the " +
+	"next chat starts with it too - don't wait to be told to remember. Never claim " +
+	"you noted or recorded something unless you actually called `remember`. Do NOT " +
+	"record transient chatter, secrets, or one-off task state.\n\n"
+
+// memoryRoot is the out-of-repo directory that holds per-project memory files.
+// os.UserConfigDir is %AppData% on Windows, ~/Library/Application Support on
+// macOS, $XDG_CONFIG_HOME (or ~/.config) on Linux - none of which is the user's
+// repo, so memory never dirties git or litters the workspace. A failure to
+// resolve it (no HOME) yields "", which the callers treat as "memory disabled".
+func memoryRoot() string {
+	base, err := os.UserConfigDir()
+	if err != nil {
+		return ""
 	}
-	return DefaultSystemPrompt
+	return filepath.Join(base, "codehamr", "memory")
 }
 
+// MemoryPath is the memory file for one project, keyed by a hash of the
+// project's absolute path so two checkouts never collide and the filename
+// leaks nothing about the path. Returns "" when the config dir can't be
+// resolved (memory disabled) so callers no-op cleanly.
+func MemoryPath(projectDir string) string {
+	root := memoryRoot()
+	if root == "" {
+		return ""
+	}
+	abs, err := filepath.Abs(projectDir)
+	if err != nil {
+		abs = projectDir
+	}
+	sum := sha256.Sum256([]byte(filepath.Clean(abs)))
+	return filepath.Join(root, hex.EncodeToString(sum[:16])+".md")
+}
+
+// LoadMemory returns the project's stored memory, capped to memorySendCapBytes
+// (keeping the newest tail, since AppendMemory writes oldest-first) so a large
+// file can't blow the ctx.FixedMemory reservation. Empty string when there's no
+// memory yet or memory is disabled.
+func LoadMemory(projectDir string) string {
+	path := MemoryPath(projectDir)
+	if path == "" {
+		return ""
+	}
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return ""
+	}
+	if len(b) > memorySendCapBytes {
+		// Keep the newest tail; snap to the next line so we don't send a
+		// half-truncated first fact.
+		b = b[len(b)-memorySendCapBytes:]
+		if i := bytes.IndexByte(b, '\n'); i >= 0 && i+1 < len(b) {
+			b = b[i+1:]
+		}
+	}
+	return strings.TrimSpace(string(b))
+}
+
+// SystemPrompt builds the wire system prompt: the project-memory block (if any)
+// prepended to the embedded prompt, then the working-directory anchor so "here"
+// resolves to a concrete path. Both entry points (TUI and headless protocol)
+// call this so memory reaches the model identically on every new chat.
+func SystemPrompt(projectDir string) string {
+	base := DefaultSystemPrompt + "\n\nWorking directory: " + projectDir
+	if mem := LoadMemory(projectDir); mem != "" {
+		return memoryPreamble + mem + "\n\n" + base
+	}
+	return base
+}
+
+// AppendMemory adds one distilled fact to the project's memory file, creating
+// the out-of-repo directory on first use. Each entry is a bullet with a UTC
+// datestamp so the model can weigh recency. When appending would push the file
+// past memoryFileMaxBytes the oldest lines are dropped first (newest facts
+// win), keeping growth bounded without a separate compaction step. Returns the
+// new total byte size, or an error the caller surfaces to the model.
+func AppendMemory(projectDir, fact string) (int, error) {
+	fact = strings.TrimSpace(fact)
+	if fact == "" {
+		return 0, errors.New("empty fact")
+	}
+	path := MemoryPath(projectDir)
+	if path == "" {
+		return 0, errors.New("memory storage unavailable (could not resolve user config dir)")
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		return 0, err
+	}
+	prior, _ := os.ReadFile(path) // missing file = first fact; treat as empty
+	entry := "- " + time.Now().UTC().Format("2006-01-02") + " " + fact + "\n"
+	combined := append(prior, entry...)
+	if len(combined) > memoryFileMaxBytes {
+		// Drop whole oldest lines until under the cap, so a fact is never left
+		// half-written at the top of the file.
+		over := len(combined) - memoryFileMaxBytes
+		if i := bytes.IndexByte(combined[over:], '\n'); i >= 0 {
+			combined = combined[over+i+1:]
+		} else {
+			combined = combined[over:]
+		}
+	}
+	// Temp+rename so a crash mid-write can't corrupt accumulated memory. 0o600:
+	// memory can quote the user's code, same as .codehamr/session.json.
+	tmp := path + ".tmp"
+	if err := os.WriteFile(tmp, combined, 0o600); err != nil {
+		return 0, err
+	}
+	if err := os.Rename(tmp, path); err != nil {
+		_ = os.Remove(tmp)
+		return 0, err
+	}
+	return len(combined), nil
+}
 
 // Bootstrap returns the config for the current project, creating .codehamr/
 // and config.yaml on first use. config.yaml is never overwritten; the prompt

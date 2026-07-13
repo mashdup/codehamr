@@ -76,9 +76,18 @@ const (
 	// relax the assertion.
 	FixedSystem = 4900
 	// FixedTools reserves budget for the JSON tool schemas sent every request.
-	// The nine built-in tools serialize to ~1650 tokens; the buffer to 2000
-	// absorbs a schema tweak without over-allocating history.
-	FixedTools  = 2000
+	// The ten built-in tools serialize to ~1750 tokens; the buffer to 2100
+	// absorbs a schema tweak without over-allocating history. (The `remember`
+	// tool added the tenth schema.)
+	FixedTools = 2100
+	// FixedMemory reserves budget for the project-memory block config.SystemPrompt
+	// prepends to the system prompt on every request (see config.LoadMemory /
+	// AppendMemory). config caps the sent memory at memorySendCapBytes (6000
+	// bytes ~= 1500 tokens); the labelled preamble adds ~130. The reservation to
+	// 1800 covers both with headroom. It's separate from FixedSystem because
+	// memory GROWS at runtime while the embedded prompt is fixed: a test pins that
+	// the byte cap plus preamble fits here, so bump both together, never one alone.
+	FixedMemory = 1800
 )
 
 // budgetHeadroomDivisor cuts the history budget by 1/this (10%) below the
@@ -416,7 +425,7 @@ func dropDanglingToolCalls(kept []Message) []Message {
 // leaves a headroom margin (see budgetHeadroomDivisor) so a char/4 undercount
 // can't push the real prompt past the declared window.
 func Budget(ctxSize int) int {
-	b := ctxSize - FixedSystem - FixedTools - ResponseReserve(ctxSize)
+	b := ctxSize - FixedSystem - FixedTools - FixedMemory - ResponseReserve(ctxSize)
 	if b < 0 {
 		return 0
 	}

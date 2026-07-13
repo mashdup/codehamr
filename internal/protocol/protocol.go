@@ -183,7 +183,7 @@ func Run(cfg *config.Config, client *llm.Client, projectDir, version string) err
 	r := &Runner{
 		cfg:            cfg,
 		client:         client,
-		system:         config.DefaultSystemPrompt + "\n\nWorking directory: " + projectDir,
+		system:         config.SystemPrompt(projectDir),
 		version:        version,
 		projectDir:     projectDir,
 		out:            os.Stdout,

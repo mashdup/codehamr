@@ -1203,10 +1203,14 @@ func (m *Model) maybeVerifyNudge() bool {
 func (m Model) cursorOnFirstLine() bool { return m.ta.Line() == 0 }
 func (m Model) cursorOnLastLine() bool  { return m.ta.Line() == m.ta.LineCount()-1 }
 
-// buildSystem appends the working-directory anchor to the embedded system
-// prompt so "hier" / "here" resolves to a concrete path.
+// buildSystem builds the wire system prompt for this project: accumulated
+// project memory (loaded from persistent out-of-repo storage) plus the embedded
+// prompt plus the working-directory anchor so "hier" / "here" resolves to a
+// concrete path. Delegates to config.SystemPrompt so the TUI and the headless
+// protocol driver assemble it identically, and every new chat starts with what
+// prior chats learned.
 func buildSystem(projectDir string) string {
-	return config.DefaultSystemPrompt + "\n\nWorking directory: " + projectDir
+	return config.SystemPrompt(projectDir)
 }
 
 // pingBackend issues a short GET to baseURL/v1/models via cloud.Reachable. Any

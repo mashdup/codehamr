@@ -594,11 +594,11 @@ func TestBudget(t *testing.T) {
 	// Reference the constants directly so a future FixedSystem/FixedTools/headroom
 	// tweak doesn't trip a magic-number mismatch absent a real regression.
 	// 65k: ctxSize/8 = 8192, just above the 8k floor.
-	if raw := 65536 - FixedSystem - FixedTools - 8192; Budget(65536) != raw-raw/budgetHeadroomDivisor {
+	if raw := 65536 - FixedSystem - FixedTools - FixedMemory - 8192; Budget(65536) != raw-raw/budgetHeadroomDivisor {
 		t.Fatalf("budget wrong at 65k: %d", Budget(65536))
 	}
 	// 262k: ctxSize/8 = 32768, matches a common thinking-mode default.
-	if raw := 262144 - FixedSystem - FixedTools - 32768; Budget(262144) != raw-raw/budgetHeadroomDivisor {
+	if raw := 262144 - FixedSystem - FixedTools - FixedMemory - 32768; Budget(262144) != raw-raw/budgetHeadroomDivisor {
 		t.Fatalf("budget wrong at 262k: %d", Budget(262144))
 	}
 	if Budget(1000) != 0 {

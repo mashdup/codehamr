@@ -1097,8 +1097,9 @@ func TestToolArgsStreamBumpsEstimateAndPhase(t *testing.T) {
 }
 
 // TestBuildToolsExposesExactlyFourTools pins the tool roster: bash, read_file,
-// write_file, edit_file, in that order, with no loop/control tool. Order is
-// part of the contract: the model sees the tools in the payload in this sequence.
+// write_file, edit_file, multi_edit, glob, grep, web_fetch, todo_write,
+// remember, in that order, with no loop/control tool. Order is part of the
+// contract: the model sees the tools in the payload in this sequence.
 func TestBuildToolsExposesExactlyFourTools(t *testing.T) {
 	m := newTestModel(t, func(http.ResponseWriter, *http.Request) {})
 	got := m.buildTools()
@@ -1112,6 +1113,7 @@ func TestBuildToolsExposesExactlyFourTools(t *testing.T) {
 		tools.GrepName,
 		tools.WebFetchName,
 		tools.TodoWriteName,
+		tools.RememberName,
 	}
 	if len(got) != len(want) {
 		t.Fatalf("buildTools returned %d tools, want %d: %+v", len(got), len(want), got)

@@ -50,7 +50,7 @@ type Tool interface {
 // the payload, pinned by test) plus a name index for O(1) dispatch. Populated
 // once from init; never mutated after, so no locking.
 var (
-	registry      []Tool
+	registry       []Tool
 	registryByName = map[string]Tool{}
 )
 
@@ -66,7 +66,7 @@ func Register(t Tool) {
 }
 
 // init wires the built-in tools in payload order: bash, read_file, write_file,
-// edit_file, multi_edit, glob, grep, web_fetch, todo_write. This is the single
+// edit_file, multi_edit, glob, grep, web_fetch, todo_write, remember. This is the single
 // registration site — the "one line per tool" the interface buys. A new tool
 // adds its file plus one Register call here.
 func init() {
@@ -79,6 +79,7 @@ func init() {
 	Register(grepTool{})
 	Register(webFetchTool{})
 	Register(todoWriteTool{})
+	Register(rememberTool{})
 }
 
 // Lookup returns the registered tool for a wire name.
