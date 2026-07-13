@@ -86,3 +86,44 @@ func TestBuildTreeSectionEmptyDir(t *testing.T) {
 		t.Fatalf("empty dir should produce no section, got %q", s)
 	}
 }
+
+func TestBuildTreeCollapsesAssetRuns(t *testing.T) {
+	paths := []string{"src/main.go", "src/util.go"}
+	for i := 0; i < 6; i++ { // >= collapseRun asset siblings in one dir
+		paths = append(paths, "assets/icon"+itoa(i)+".svg")
+	}
+	root := mkTree(t, paths...)
+	tree, _ := buildTree(root)
+	if !strings.Contains(tree, "6 *.svg files") {
+		t.Fatalf("asset run should collapse to a count line:\n%s", tree)
+	}
+	if strings.Contains(tree, "icon0.svg") {
+		t.Fatalf("collapsed asset names must not be listed individually:\n%s", tree)
+	}
+	// Source files are never collapsed — the model needs their names to read them.
+	for _, want := range []string{"main.go", "util.go"} {
+		if !strings.Contains(tree, want) {
+			t.Fatalf("source file %q must stay listed:\n%s", want, tree)
+		}
+	}
+}
+
+func TestBuildTreeKeepsSmallAssetRuns(t *testing.T) {
+	// Below collapseRun, listing the names is cheaper than losing them.
+	root := mkTree(t, "logo.png", "hero.png")
+	tree, _ := buildTree(root)
+	for _, want := range []string{"logo.png", "hero.png"} {
+		if !strings.Contains(tree, want) {
+			t.Fatalf("small asset run must stay listed by name, missing %q:\n%s", want, tree)
+		}
+	}
+}
+
+func TestBuildTreeSingleSpaceIndent(t *testing.T) {
+	root := mkTree(t, "src/util/helper.go")
+	tree, _ := buildTree(root)
+	// helper.go sits two levels deep: exactly two leading spaces, never four.
+	if !strings.Contains(tree, "\n  helper.go\n") {
+		t.Fatalf("expected single-space-per-level indent for helper.go:\n%q", tree)
+	}
+}

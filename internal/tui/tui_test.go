@@ -57,7 +57,7 @@ func TestSystemPromptIncludesWorkingDirAndInvestigateRule(t *testing.T) {
 	cfg, _, _ := config.Bootstrap(t.TempDir())
 	projectDir := "/workspaces/codehamr"
 	m := New(cfg, llm.New("http://x", cfg.ActiveProfile().LLM, ""), projectDir, "test")
-	if !strings.Contains(m.system, "investigate with `read_file` and `bash`") {
+	if !strings.Contains(m.system, "investigate it yourself, never ask the user to paste") {
 		t.Fatalf("system prompt missing the investigate-files-yourself rule:\n%s", m.system)
 	}
 	if !strings.Contains(m.system, "Working directory: "+projectDir) {

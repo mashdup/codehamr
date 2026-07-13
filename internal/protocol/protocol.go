@@ -126,10 +126,18 @@ type Runner struct {
 	system     string
 	version    string
 	projectDir string
-	// treeText is the current file-tree system-prompt block, refreshed at
-	// each turn start so the model never opens with a discovery `ls -R` and
-	// sees its own writes reflected next turn. Owned by the turn goroutine.
+	// treeText is the session-start file-tree block, built once so the model
+	// never opens with a discovery `ls -R`. buildMessages appends it to the
+	// newest user message on the wire (never to history), keeping the cacheable
+	// prefix stable across edits. Owned by the turn goroutine.
 	treeText string
+	// treeShown latches once the model has received a completed request, i.e.
+	// the one-time tree has reached it. From then on the model tracks its own
+	// edits, so re-sending the tree every turn is pure churn; it's built and
+	// attached only while this is false. Set after a successful round, never in
+	// buildMessages, so the noImages retry can't latch it before the request
+	// that actually lands.
+	treeShown bool
 
 	outMu sync.Mutex
 	out   io.Writer
@@ -280,7 +288,12 @@ func (r *Runner) dispatch(cmd command) {
 func (r *Runner) runTurn(text string, images []imageAtt) {
 	turnCtx, cancel := context.WithCancel(context.Background())
 	seq := r.installTurn(cancel)
-	r.treeText = buildTreeSection(r.projectDir)
+	// The tree is a one-time, session-start orientation (see treeShown): built
+	// and attached only until the model has received it once. Skipping the
+	// rebuild afterwards also spares the filesystem walk on every later turn.
+	if !r.treeShown {
+		r.treeText = buildTreeSection(r.projectDir)
+	}
 	// A panic in the turn loop must reach the harness as a readable fatal
 	// error, not kill the process silently mid-session. The stack still goes
 	// to stderr for the post-mortem; the session survives for the next prompt.
@@ -360,6 +373,9 @@ func (r *Runner) runTurn(text string, images []imageAtt) {
 		}
 		rounds++
 		r.history = append(r.history, *final)
+		// A completed round means the request reached the model; if this was the
+		// session's first turn the one-time tree came with it, so never resend.
+		r.treeShown = true
 		r.emit(event{V: V, Type: "assistant_done"})
 
 		if len(final.ToolCalls) == 0 {
@@ -705,26 +721,68 @@ func (r *Runner) recordToolResult(call *chmctx.ToolCall, content string, ok bool
 
 func (r *Runner) buildMessages() []chmctx.Message {
 	budget := chmctx.Budget(r.activeContextSize())
-	sys := r.system
-	// The tree pays for itself out of the history budget (FixedSystem only
-	// reserves for the embedded prompt), and is dropped entirely when it
-	// would eat more than a quarter of a small context's budget.
-	if r.treeText != "" {
+	// The file tree rides on the current user turn (appended to that message on
+	// the wire, never stored in history) rather than the system prompt. Keeping
+	// it OUT of the leading prefix is what lets a backend's automatic prefix
+	// cache survive a file edit: were it glued to the system prompt, the one
+	// turn it changed would invalidate the cached KV for the tree AND the entire
+	// history behind it. On the tail it only ever invalidates itself.
+	//
+	// Attached ONCE per session: only while it hasn't been shown (treeShown) and
+	// only on the turn's first round (the newest history message is still the
+	// user's, before any assistant reply). After the model has the initial
+	// layout it tracks its own edits, so a per-turn resend is pure churn.
+	// Reserved out of the history budget (FixedSystem covers only the embedded
+	// prompt), and dropped when it would eat more than a quarter of a small
+	// context's budget.
+	attachTree := !r.treeShown && r.treeText != "" && r.newestIsUser()
+	if attachTree {
 		if tt := chmctx.Tokens(r.treeText); tt*4 < budget {
-			sys += "\n\n" + r.treeText
 			budget -= tt
+		} else {
+			attachTree = false
 		}
 	}
 	packed := chmctx.Pack(r.history, budget)
 	out := make([]chmctx.Message, 0, len(packed.Messages)+1)
-	out = append(out, chmctx.Message{Role: chmctx.RoleSystem, Content: sys})
+	out = append(out, chmctx.Message{Role: chmctx.RoleSystem, Content: r.system})
 	for _, m := range packed.Messages {
 		if r.noImages {
 			m.Images = nil // struct copy; history keeps the attachments
 		}
 		out = append(out, m)
 	}
+	if attachTree {
+		// Append to the newest user message's content on this wire copy only.
+		// The newest message is always kept by Pack, so at round 0 it is the
+		// user turn; the guarded search stays correct even if Pack's anchor or
+		// demote passes reshaped the tail. r.history is untouched.
+		if i := lastUserIndex(out); i >= 0 {
+			out[i].Content += "\n\n" + r.treeText
+		}
+	}
 	return out
+}
+
+// newestIsUser reports whether the last history message is a user turn — true
+// exactly on a turn's first round, since the only user messages appended are
+// the turn prompts (runTurn). It gates attaching the once-per-turn file tree.
+func (r *Runner) newestIsUser() bool {
+	n := len(r.history)
+	return n > 0 && r.history[n-1].Role == chmctx.RoleUser
+}
+
+// lastUserIndex returns the index of the last user-role message in msgs, or -1.
+// The tree attaches to the newest user turn, which is the last such message
+// (anchorUserMessage may prepend the ORIGINAL task at the front, an earlier
+// user message this deliberately skips past).
+func lastUserIndex(msgs []chmctx.Message) int {
+	for i := len(msgs) - 1; i >= 0; i-- {
+		if msgs[i].Role == chmctx.RoleUser {
+			return i
+		}
+	}
+	return -1
 }
 
 // historyHasImages reports whether any history message carries attachments —
