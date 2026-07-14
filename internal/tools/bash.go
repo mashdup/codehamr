@@ -80,8 +80,17 @@ func Bash(parent context.Context, command string, timeout time.Duration) string 
 	// would see is lost. Stdout and Stderr get the SAME writer value, which
 	// os/exec detects and funnels through one pipe: no locking needed.
 	buf := &headTailBuffer{}
-	cmd.Stdout = buf
-	cmd.Stderr = buf
+	// Tee live output to a sink when one is registered (protocol driver
+	// streaming to the UI). The final capped result still comes from buf, so
+	// the model's context is unchanged; the sink only feeds the live view.
+	if sink := outputSink(parent); sink != nil {
+		w := &teeWriter{buf: buf, sink: sink}
+		cmd.Stdout = w
+		cmd.Stderr = w
+	} else {
+		cmd.Stdout = buf
+		cmd.Stderr = buf
+	}
 	err := cmd.Run()
 	s := buf.String()
 	// Name the capture drop at the END of the output, where ctx.Truncate's
@@ -197,8 +206,21 @@ const (
 	bashOutputTail = 1 << 20
 )
 
-// headTailBuffer is an io.Writer keeping the first bashOutputHead and the last
-// bashOutputTail bytes written, discarding the middle. The tail is a fixed ring
+// teeWriter fans each Write out to a live sink and the head/tail buffer. os/exec
+// gives stdout and stderr the same writer value, so writes are already
+// serialized (one pipe) — no locking needed. The sink sees bytes in arrival
+// order; the buffer still holds the capped final result for the model.
+type teeWriter struct {
+	buf  *headTailBuffer
+	sink OutputSink
+}
+
+func (w *teeWriter) Write(p []byte) (int, error) {
+	w.sink(p)
+	return w.buf.Write(p)
+}
+
+// headTailBuffer is an io.Writer keeping the first bashOutputHead and the last// bashOutputTail bytes written, discarding the middle. The tail is a fixed ring
 // so a firehose costs a bounded copy, never an allocation per write.
 type headTailBuffer struct {
 	head      []byte

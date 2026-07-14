@@ -47,15 +47,17 @@ const maxCommandLine = 32 << 20
 // command is every client→agent line, one flat struct: with a handful of
 // small variants, a tagged union isn't worth the decode ceremony.
 type command struct {
-	V        int        `json:"v"`
-	Type     string     `json:"type"`
-	Text     string     `json:"text,omitempty"`     // prompt
-	Images   []imageAtt `json:"images,omitempty"`   // prompt
-	CallID   string     `json:"callId,omitempty"`   // approve
-	Decision string     `json:"decision,omitempty"` // approve: allow|deny
-	Scope    string     `json:"scope,omitempty"`    // approve: once|session
-	Name     string     `json:"name,omitempty"`     // set_model
-	Mode     string     `json:"mode,omitempty"`     // set_mode: ask|auto
+	V         int        `json:"v"`
+	Type      string     `json:"type"`
+	Text      string     `json:"text,omitempty"`      // prompt
+	Images    []imageAtt `json:"images,omitempty"`    // prompt
+	CallID    string     `json:"callId,omitempty"`    // approve
+	Decision  string     `json:"decision,omitempty"`  // approve: allow|deny
+	Scope     string     `json:"scope,omitempty"`     // approve: once|session
+	Name      string     `json:"name,omitempty"`      // set_model
+	Mode      string     `json:"mode,omitempty"`      // set_mode: ask|auto
+	Selection *int       `json:"selection,omitempty"` // ask_user_response: option index, or -1 for custom text
+	Custom    string     `json:"custom,omitempty"`    // ask_user_response: the typed custom answer when selection is -1
 }
 
 // Permission modes. ModeAsk gates every side-effecting tool behind the
@@ -89,8 +91,8 @@ type event struct {
 	Version       string         `json:"version,omitempty"`       // ready
 	Active        string         `json:"activeModel,omitempty"`   // ready, models
 	Models        []modelInfo    `json:"models,omitempty"`        // ready, models
-	Text          string         `json:"text,omitempty"`          // assistant_delta, reasoning_delta
-	CallID        string         `json:"callId,omitempty"`        // tool_call, tool_result
+	Text          string         `json:"text,omitempty"`          // assistant_delta, reasoning_delta, tool_output_delta
+	CallID        string         `json:"callId,omitempty"`        // tool_call, tool_result, tool_output_delta
 	Name          string         `json:"name,omitempty"`          // tool_call
 	Args          map[string]any `json:"args,omitempty"`          // tool_call
 	NeedsApproval *bool          `json:"needsApproval,omitempty"` // tool_call
@@ -106,6 +108,8 @@ type event struct {
 	URL           string         `json:"url,omitempty"`           // preview
 	HistoryLen    int            `json:"historyLen,omitempty"`    // ready: restored messages
 	Mode          string         `json:"mode,omitempty"`          // ready, mode
+	Prompt        string         `json:"prompt,omitempty"`        // ask_user
+	Options       []string       `json:"options,omitempty"`       // ask_user
 }
 
 type usage struct {
@@ -163,6 +167,10 @@ type Runner struct {
 	// instant reply can't race the registration.
 	approveMu sync.Mutex
 	approvals map[string]chan approval
+	// asks routes an ask_user_response command to the turn goroutine blocked on
+	// that callId, mirroring the approvals map. Registered before the ask_user
+	// event is emitted so an instant reply can't race the registration.
+	asks map[string]chan askReply
 	// sessionAllowed holds tool names the user granted "session" scope;
 	// their later calls skip the gate.
 	sessionAllowed map[string]bool
@@ -185,6 +193,13 @@ type approval struct {
 	scope string
 }
 
+// askReply is the user's answer to an askUser call: either a chosen option
+// (custom == "") or a typed custom answer (custom != "", selection == -1).
+type askReply struct {
+	selection int
+	custom    string
+}
+
 // Run drives a session over stdin/stdout until stdin closes. projectDir
 // anchors the system prompt exactly as the TUI does.
 func Run(cfg *config.Config, client *llm.Client, projectDir, version string) error {
@@ -196,6 +211,7 @@ func Run(cfg *config.Config, client *llm.Client, projectDir, version string) err
 		projectDir:     projectDir,
 		out:            os.Stdout,
 		approvals:      map[string]chan approval{},
+		asks:           map[string]chan askReply{},
 		sessionAllowed: map[string]bool{},
 		mode:           ModeAsk, // safe default; the harness opts into auto
 	}
@@ -231,6 +247,8 @@ func (r *Runner) dispatch(cmd command) {
 		go r.runTurn(cmd.Text, cmd.Images)
 	case "approve":
 		r.deliverApproval(cmd)
+	case "ask_user_response":
+		r.deliverAskReply(cmd)
 	case "cancel":
 		r.cancelTurn()
 	case "set_model":
@@ -641,6 +659,11 @@ func (r *Runner) runTool(turnCtx context.Context, call *chmctx.ToolCall) bool {
 	if call.Name == previewFileName || call.Name == previewURLName {
 		return r.runPreviewTool(call)
 	}
+	// ask_user blocks the turn on a user selection, reusing the approval
+	// machinery's registered-channel pattern rather than a shell run.
+	if call.Name == askUserName {
+		return r.runAskUserTool(turnCtx, call)
+	}
 	needs := r.needsApproval(call.Name)
 	var decisionCh chan approval
 	if needs {
@@ -680,7 +703,22 @@ func (r *Runner) runTool(turnCtx context.Context, call *chmctx.ToolCall) bool {
 		}
 	}
 
+	// Stream live output for bash so the UI can show it before the command
+	// finishes. A coalescing streamer batches the write firehose into
+	// tool_output_delta events; the model still only sees the final capped
+	// tool_result below.
+	var streamer *outputStreamer
+	if call.Name == tools.BashName {
+		streamer = newOutputStreamer(call.ID, func(callID, text string) {
+			r.emit(event{V: V, Type: "tool_output_delta", CallID: callID, Text: text})
+		})
+		turnCtx = tools.WithOutputSink(turnCtx, streamer.write)
+	}
+
 	result := tools.Execute(turnCtx, *call)
+	if streamer != nil {
+		streamer.close()
+	}
 	if turnCtx.Err() != nil {
 		// Cancelled mid-run: Execute already reported "(cancelled)"; record it
 		// so the assistant's call stays paired, then stop dispatching.
@@ -888,6 +926,85 @@ func (r *Runner) runPreviewTool(call *chmctx.ToolCall) bool {
 	return true
 }
 
+// ---------------------------------------------------------------------------
+// ask_user: harness-only, protocol-mode-only. It emits an `ask_user` event the
+// GUI renders as a selection prompt above the composer, then blocks the turn
+// until an `ask_user_response` command arrives (a chosen option, or a typed
+// custom answer). Reuses the approval machinery's registered-channel pattern.
+// ---------------------------------------------------------------------------
+
+const askUserName = "askUser"
+
+// maxAskOptions caps the choices offered; the GUI renders them as buttons and
+// the tool schema advertises the same ceiling.
+const maxAskOptions = 5
+
+// runAskUserTool validates args, emits the ask_user event, and blocks on the
+// user's reply. There is no "cancel": the user either picks an option or types
+// a custom answer, and either way the agent stays alive and gets the text.
+func (r *Runner) runAskUserTool(turnCtx context.Context, call *chmctx.ToolCall) bool {
+	prompt, _ := call.Arguments["prompt"].(string)
+	prompt = strings.TrimSpace(prompt)
+	options := stringSlice(call.Arguments["options"])
+
+	needs := false
+	r.emit(event{
+		V: V, Type: "tool_call",
+		CallID: call.ID, Name: call.Name, Args: call.Arguments,
+		NeedsApproval: &needs,
+	})
+
+	if prompt == "" {
+		r.recordToolResult(call, "(askUser: prompt is required)", false)
+		return true
+	}
+	if len(options) == 0 {
+		r.recordToolResult(call, "(askUser: at least one option is required)", false)
+		return true
+	}
+	if len(options) > maxAskOptions {
+		r.recordToolResult(call, fmt.Sprintf("(askUser: at most %d options allowed, got %d)", maxAskOptions, len(options)), false)
+		return true
+	}
+
+	replyCh := r.registerAsk(call.ID)
+	r.emit(event{V: V, Type: "ask_user", CallID: call.ID, Prompt: prompt, Options: options})
+
+	select {
+	case reply := <-replyCh:
+		answer := reply.custom
+		if answer == "" && reply.selection >= 0 && reply.selection < len(options) {
+			answer = options[reply.selection]
+		}
+		answer = strings.TrimSpace(answer)
+		if answer == "" {
+			r.recordToolResult(call, "(the user dismissed the selection without answering)", true)
+			return true
+		}
+		r.recordToolResult(call, "The user selected: "+answer, true)
+		return true
+	case <-turnCtx.Done():
+		r.unregisterAsk(call.ID)
+		return false
+	}
+}
+
+// stringSlice coerces a decoded JSON value into a []string, dropping non-string
+// members. Tool args arrive as []any from the JSON decoder.
+func stringSlice(v any) []string {
+	arr, ok := v.([]any)
+	if !ok {
+		return nil
+	}
+	out := make([]string, 0, len(arr))
+	for _, item := range arr {
+		if s, ok := item.(string); ok {
+			out = append(out, s)
+		}
+	}
+	return out
+}
+
 // workspacePath resolves p against the project dir and refuses paths that
 // escape it — the preview panel is scoped to the workspace.
 func (r *Runner) workspacePath(p string) (string, error) {
@@ -952,6 +1069,35 @@ func buildTools() []llm.Tool {
 						},
 					},
 					"required": []string{"url"},
+				},
+			},
+		},
+		llm.Tool{
+			Type: "function",
+			Function: llm.FunctionDef{
+				Name: askUserName,
+				Description: "Ask the USER to choose from a short list of options (max 5), shown as " +
+					"buttons above their message box. Use when you hit a genuine decision only the " +
+					"user can make and a small set of answers covers it. The user can click an option " +
+					"or type their own answer instead; either way their choice comes back to you as " +
+					"the tool result and the turn continues. Don't use it for things you can decide or " +
+					"investigate yourself.",
+				Parameters: map[string]any{
+					"type": "object",
+					"properties": map[string]any{
+						"prompt": map[string]any{
+							"type":        "string",
+							"description": "The question to put to the user.",
+						},
+						"options": map[string]any{
+							"type":        "array",
+							"items":       map[string]any{"type": "string"},
+							"minItems":    1,
+							"maxItems":    maxAskOptions,
+							"description": "The selectable answers (1 to 5). The user may also type a custom answer.",
+						},
+					},
+					"required": []string{"prompt", "options"},
 				},
 			},
 		},
@@ -1040,6 +1186,41 @@ func (r *Runner) deliverApproval(cmd command) {
 		return
 	}
 	ch <- approval{allow: cmd.Decision == "allow", scope: cmd.Scope}
+}
+
+// registerAsk/unregisterAsk/deliverAskReply mirror the approval trio for the
+// ask_user handshake; they share approveMu since both maps are tiny and only
+// touched around the turn goroutine's blocking points.
+func (r *Runner) registerAsk(callID string) chan askReply {
+	ch := make(chan askReply, 1)
+	r.approveMu.Lock()
+	r.asks[callID] = ch
+	r.approveMu.Unlock()
+	return ch
+}
+
+func (r *Runner) unregisterAsk(callID string) {
+	r.approveMu.Lock()
+	delete(r.asks, callID)
+	r.approveMu.Unlock()
+}
+
+func (r *Runner) deliverAskReply(cmd command) {
+	r.approveMu.Lock()
+	ch, ok := r.asks[cmd.CallID]
+	if ok {
+		delete(r.asks, cmd.CallID)
+	}
+	r.approveMu.Unlock()
+	if !ok {
+		r.emitError(fmt.Sprintf("no pending ask for callId %q", cmd.CallID), false)
+		return
+	}
+	sel := -1
+	if cmd.Selection != nil {
+		sel = *cmd.Selection
+	}
+	ch <- askReply{selection: sel, custom: cmd.Custom}
 }
 
 func (r *Runner) tryAcquireTurn() bool {

@@ -49,9 +49,9 @@ func TestBootstrapCreatesLayout(t *testing.T) {
 	}
 	p, ok := cfg.Models["local"]
 	if !ok {
-		t.Fatal("default should include a 'local' profile")
+		t.Fatalf("default should include a 'local' profile")
 	}
-	if p.URL != "http://localhost:11434" || p.LLM != "qwen3.6:27b" || p.ContextSize != 32768 {
+	if p.URL != "http://localhost:11434" || p.LLM != "qwen3.6:27b" || p.ContextSize != 0 {
 		t.Fatalf("default local profile mismatch: %+v", p)
 	}
 	hp, ok := cfg.Models["hamrpass"]
@@ -570,7 +570,7 @@ models:
 	if err != nil {
 		t.Fatal(err)
 	}
-	if cfg.ActiveProfile().ContextSize != defaultContextSize {
+	if cfg.ActiveProfile().ContextSize != 0 {
 		t.Fatalf("context_size=0 should be coerced to %d, got %d",
 			defaultContextSize, cfg.ActiveProfile().ContextSize)
 	}

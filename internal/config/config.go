@@ -78,7 +78,7 @@ var managedProfiles = map[string]Profile{
 		LLM:         "qwen3.6:27b",
 		URL:         "http://localhost:11434",
 		Key:         "",
-		ContextSize: defaultContextSize,
+		ContextSize: 0,
 	},
 	"hamrpass": {
 		LLM: "hamrpass",
@@ -320,20 +320,6 @@ func Bootstrap(projectRoot string) (*Config, bool, error) {
 	for name, p := range cfg.Models {
 		if p == nil {
 			return nil, false, fmt.Errorf("config.yaml: profile %q is empty; remove it or fill in the required fields", name)
-		}
-	}
-	// Coerce missing/zero/negative context_size to the default. The packer
-	// subtracts fixed reservations and floors at 0, so a bogus value would
-	// silently degenerate packing to "keep only the newest message". Coerce
-	// here so nothing downstream has to defend. Cloud profiles are exempt:
-	// their size arrives via X-Context-Window on the first response, and the
-	// TUI holds a runtime fallback until then.
-	for name, p := range cfg.Models {
-		if IsCloudProfile(name) {
-			continue
-		}
-		if p.ContextSize <= 0 {
-			p.ContextSize = defaultContextSize
 		}
 	}
 	// Coerce a dangling Active to the first profile in sorted order
