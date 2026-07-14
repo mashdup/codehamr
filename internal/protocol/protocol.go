@@ -344,8 +344,15 @@ func (r *Runner) runTurn(text string, images []imageAtt) {
 	// without them, so a weak model could hammer a failing tool for 30+ minutes
 	// until the user hit Cancel. Halt with a clear error instead.
 	toolRounds := 0
-	failKey := ""
-	failStreak := 0
+	// Keyed by tool target (see toolTargetKey): each target's own run of
+	// consecutive failures, independent of what any OTHER target is doing. A
+	// single shared failKey/failStreak pair let a model dodge the nudge by
+	// interleaving an unrelated-but-successful call (a "helpful" grep, say)
+	// between repeats of the SAME failing edit — that success reset the one
+	// shared streak to zero even though the actual stuck target never
+	// improved. Per-target counts close that gap: only a success against
+	// THIS target clears THIS target's count.
+	failCounts := map[string]int{}
 	failNudges := 0
 	runawayNudged := false
 	for {
@@ -416,16 +423,13 @@ func (r *Runner) runTurn(text string, images []imageAtt) {
 				failed = !strings.HasPrefix(strings.TrimSpace(rc), "(denied") &&
 					toolResultFailed(call.Name, rc)
 			}
+			k := toolTargetKey(*call)
 			if failed {
-				if k := toolTargetKey(*call); k == failKey && failKey != "" {
-					failStreak++
-				} else {
-					failKey, failStreak = k, 1
-				}
+				failCounts[k]++
 			} else {
-				failKey, failStreak = "", 0
+				delete(failCounts, k)
 			}
-			if failStreak >= maxToolFailStreak {
+			if failCounts[k] >= maxToolFailStreak {
 				failNudges++
 				if failNudges >= maxFailNudges {
 					nonFatal := false
@@ -433,8 +437,8 @@ func (r *Runner) runTurn(text string, images []imageAtt) {
 						Message: "stopped: the model kept repeating the same failing tool call and did not recover after a nudge — read the tool error above, or try a stronger model."})
 					return
 				}
-				r.history = append(r.history, chmctx.Message{Role: chmctx.RoleSystem, Content: failNudgeText(failStreak)})
-				failKey, failStreak = "", 0
+				r.history = append(r.history, chmctx.Message{Role: chmctx.RoleSystem, Content: failNudgeText(failCounts[k])})
+				delete(failCounts, k)
 			}
 		}
 		// Runaway backstop for turns that never finish even as the failing target

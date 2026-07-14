@@ -210,13 +210,17 @@ type Model struct {
 	// Repeated-failure nudge, the first of the four deterministic backstops. A
 	// turn otherwise ends purely when the model stops calling tools; nothing
 	// forces a tool or yields. lastToolKey is the most recently dispatched tool's
-	// target identity (set in dispatchNextTool); failKey/failStreak track how
-	// often that SAME target failed the SAME way. At maxToolFailStreak we inject
+	// target identity (set in dispatchNextTool); failCounts tracks, PER TARGET,
+	// how often that target failed the same way. At maxToolFailStreak we inject
 	// one system note to change approach: a nudge, never a hard yield. Keyed on
 	// tool+target (not full args) so cosmetic retry differences can't defeat it.
+	// Per-target (not one shared counter) matters: a shared counter let a model
+	// dodge the nudge by interleaving an unrelated-but-successful call (a
+	// "helpful" grep, say) between repeats of the SAME failing edit — that
+	// success reset the one shared count to zero even though the actual stuck
+	// target never improved.
 	lastToolKey string
-	failKey     string
-	failStreak  int
+	failCounts  map[string]int
 
 	// Runaway-iteration nudge, sibling to the failure nudge. A 30B model can
 	// loop on plausible *non-failing* calls (re-read, re-grep, re-list) forever;
@@ -292,6 +296,7 @@ func New(cfg *config.Config, cli *llm.Client, projectDir, version string) Model 
 		reasoning:       new(strings.Builder),
 		histIdx:         -1,
 		liveContextSize: map[string]int{},
+		failCounts:      map[string]int{},
 	}
 	// Record the active backend + budget once, before any turn, so a shared log
 	// names exactly which model/endpoint/context window produced the behaviour.
@@ -599,10 +604,10 @@ func (m Model) submit(sendText, echoText string, entry promptEntry) (tea.Model, 
 		dbgWritef("user_slash", "%s", safeText)
 		return m.runSlash(sendText)
 	}
-	// A new user message is a new goal: drop any in-progress failure streak so
-	// a stale count can't trip the nudge early. History persists; only the
-	// counter resets.
-	m.failKey, m.failStreak = "", 0
+	// A new user message is a new goal: drop any in-progress failure counts so
+	// a stale one can't trip the nudge early. History persists; only the
+	// counters reset.
+	m.failCounts = map[string]int{}
 	dbgWritef("user", "%s", sendText)
 	return m, m.appendUserTurn(sendText)
 }
@@ -1089,43 +1094,47 @@ func toolResultFailed(name, result string) bool {
 	return tools.ResultFailed(name, result)
 }
 
-// recordToolOutcome updates the failure streak from one finished tool result.
-// A success (or a failure of a different target) resets the streak; a same-
-// target failure extends it. lastToolKey was stamped in dispatchNextTool for
-// the call this result belongs to.
+// recordToolOutcome updates the failure count for the target this result
+// belongs to (lastToolKey, stamped in dispatchNextTool). A success against a
+// target clears THAT target's count only; other targets' counts are
+// untouched — a model interleaving unrelated successful calls between repeats
+// of the same failing one must not get to dodge the nudge that way.
 func (m *Model) recordToolOutcome(name, content string) {
 	if !toolResultFailed(name, content) {
-		m.failKey, m.failStreak = "", 0
+		delete(m.failCounts, m.lastToolKey)
 		return
 	}
-	if m.lastToolKey == m.failKey && m.failKey != "" {
-		m.failStreak++
-	} else {
-		m.failKey = m.lastToolKey
-		m.failStreak = 1
-	}
-	// Log only failures: a success leaves the streak at 0 and is already visible
-	// as a tool_result. The climbing streak is the nudge machinery's state, the
+	m.failCounts[m.lastToolKey]++
+	// Log only failures: a success leaves the count at 0 and is already visible
+	// as a tool_result. The climbing count is the nudge machinery's state, the
 	// part the per-message records can't show.
-	dbgWritef("tool_outcome", "tool=%s FAILED · same-target streak=%d/%d · key=%s", name, m.failStreak, maxToolFailStreak, m.failKey)
+	dbgWritef("tool_outcome", "tool=%s FAILED · same-target streak=%d/%d · key=%s", name, m.failCounts[m.lastToolKey], maxToolFailStreak, m.lastToolKey)
 }
 
-// maybeFailureNudge appends one system-role note once the same target has
-// failed maxToolFailStreak times running, then resets the streak so it fires at
-// most once per run of failures. A nudge, not a yield: the model stays in
-// control and decides whether to pivot or stop and tell the user.
+// maybeFailureNudge appends one system-role note once some target has failed
+// maxToolFailStreak times running, then resets that target's count so it
+// fires at most once per run of failures. Called after the whole pending
+// batch drains (see the toolResultMsg handler), so more than one target could
+// independently be over threshold; picking any single one to nudge on is
+// enough; ranging a map is nondeterministic which one, and that's fine here —
+// a target left over threshold this round just nudges on a later one. A
+// nudge, not a yield: the model stays in control and decides whether to pivot
+// or stop and tell the user.
 func (m *Model) maybeFailureNudge() {
-	if m.failStreak < maxToolFailStreak {
+	for key, streak := range m.failCounts {
+		if streak < maxToolFailStreak {
+			continue
+		}
+		dbgWritef("nudge", "repeated-failure nudge injected after %d same-target failures (key=%s)", streak, key)
+		m.history = append(m.history, chmctx.Message{
+			Role: chmctx.RoleSystem,
+			Content: nudgeOrigin + fmt.Sprintf(
+				"The last %d tool calls to the same target failed the same way. Stop repeating it - read the error, change your approach, or tell the user what's blocking you.",
+				streak),
+		})
+		delete(m.failCounts, key)
 		return
 	}
-	dbgWritef("nudge", "repeated-failure nudge injected after %d same-target failures (key=%s)", m.failStreak, m.failKey)
-	m.history = append(m.history, chmctx.Message{
-		Role: chmctx.RoleSystem,
-		Content: nudgeOrigin + fmt.Sprintf(
-			"The last %d tool calls to the same target failed the same way. Stop repeating it - read the error, change your approach, or tell the user what's blocking you.",
-			m.failStreak),
-	})
-	m.failKey, m.failStreak = "", 0
 }
 
 // maxToolRounds caps tool calls per turn before the runaway self-check fires.

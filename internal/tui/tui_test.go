@@ -1873,9 +1873,9 @@ func TestRepeatedFailureNudgeFiresOnceAfterFiveSameTargetFailures(t *testing.T) 
 	if !strings.Contains(last.Content, fmt.Sprintf("last %d tool calls", maxToolFailStreak)) {
 		t.Fatalf("nudge should name the streak count: %q", last.Content)
 	}
-	// Streak resets after firing so it can't double-fire on the next failure.
-	if final.failStreak != 0 || final.failKey != "" {
-		t.Fatalf("nudge must reset failKey/failStreak, got key=%q streak=%d", final.failKey, final.failStreak)
+	// Count resets after firing so it can't double-fire on the next failure.
+	if n := len(final.failCounts); n != 0 {
+		t.Fatalf("nudge must reset the target's count, got %d entries left: %+v", n, final.failCounts)
 	}
 }
 
@@ -1917,16 +1917,16 @@ func TestRepeatedFailureNudgeSuccessResetsStreak(t *testing.T) {
 	}
 }
 
-// TestRepeatedFailureNudgeDifferentTargetResetsStreak: switching targets
-// between failures resets the streak: exploration across distinct operations
-// must not trip the nudge.
+// TestRepeatedFailureNudgeDifferentTargetResetsStreak: each failure against a
+// genuinely distinct target only counts once for THAT target, so no single
+// target ever reaches maxToolFailStreak and the nudge must not fire.
 func TestRepeatedFailureNudgeDifferentTargetResetsStreak(t *testing.T) {
 	m := newTestModel(t, func(http.ResponseWriter, *http.Request) {})
 	fail := chmctx.Message{Role: chmctx.RoleTool, ToolName: tools.BashName, Content: "x\n(exit: exit status 1)"}
 
 	var mm tea.Model = m
-	// Each iteration fails, but against a different bash target, so the streak
-	// keeps resetting to 1 and never reaches maxToolFailStreak.
+	// Each iteration fails, but against a different bash target, so no single
+	// target's count ever reaches maxToolFailStreak.
 	for i := 0; i < maxToolFailStreak+2; i++ {
 		cur := mm.(Model)
 		cur.lastToolKey = fmt.Sprintf("%s|echo %d", tools.BashName, i)
@@ -1939,26 +1939,75 @@ func TestRepeatedFailureNudgeDifferentTargetResetsStreak(t *testing.T) {
 			t.Fatalf("distinct targets must not trip the nudge, but one fired:\n%+v", final.history)
 		}
 	}
-	if final.failStreak != 1 {
-		t.Fatalf("after distinct-target failures the streak should sit at 1, got %d", final.failStreak)
+	// Every distinct target only ever failed once.
+	for key, count := range final.failCounts {
+		if count != 1 {
+			t.Fatalf("target %q should have failed exactly once, got %d", key, count)
+		}
 	}
 }
 
-// TestSubmitResetsFailureStreak: a fresh user submission is a new goal, so a
-// stale streak from the previous goal must not carry over and trip the nudge
-// early. submit's non-slash path zeroes failKey/failStreak.
+// TestRepeatedFailureNudgeUnrelatedTargetSuccessDoesNotResetStreak: the bug
+// this test guards against reached real users - a model stuck on one failing
+// edit_file target would interleave unrelated-but-successful grep/bash calls
+// between retries, and a single shared failKey/failStreak pair reset to zero
+// on ANY success, letting the stuck target dodge the nudge indefinitely even
+// though it never actually improved. A success must only clear the count for
+// the target it belongs to.
+func TestRepeatedFailureNudgeUnrelatedTargetSuccessDoesNotResetStreak(t *testing.T) {
+	m := newTestModel(t, func(http.ResponseWriter, *http.Request) {})
+	stuckTarget := tools.EditFileName + "|Workspace.tsx"
+	otherTarget := tools.BashName + "|grep -n foo"
+	fail := chmctx.Message{Role: chmctx.RoleTool, ToolName: tools.EditFileName, Content: "(not found: old_string does not appear in Workspace.tsx)"}
+	ok := chmctx.Message{Role: chmctx.RoleTool, ToolName: tools.BashName, Content: "foo.tsx:12: match"}
+
+	var mm tea.Model = m
+	// Fail the stuck target, succeed on an unrelated one, repeat - the stuck
+	// target must still accumulate to the nudge despite never seeing two
+	// consecutive failures against itself.
+	for i := 0; i < maxToolFailStreak; i++ {
+		cur := mm.(Model)
+		cur.lastToolKey = stuckTarget
+		out, _ := cur.recordAndNudge(fail)
+		mm = out
+
+		cur = mm.(Model)
+		cur.lastToolKey = otherTarget
+		out, _ = cur.recordAndNudge(ok)
+		mm = out
+	}
+	final := mm.(Model)
+
+	nudges := 0
+	var last chmctx.Message
+	for _, msg := range final.history {
+		if msg.Role == chmctx.RoleSystem {
+			nudges++
+			last = msg
+		}
+	}
+	if nudges != 1 {
+		t.Fatalf("stuck target must still trip the nudge despite interleaved unrelated successes, got %d nudges:\n%+v",
+			nudges, final.history)
+	}
+	if !strings.Contains(last.Content, fmt.Sprintf("last %d tool calls", maxToolFailStreak)) {
+		t.Fatalf("nudge should name the streak count: %q", last.Content)
+	}
+}
+
+// TestSubmitResetsFailureStreak: a fresh user submission is a new goal, so
+// stale counts from the previous goal must not carry over and trip the nudge
+// early. submit's non-slash path clears failCounts.
 func TestSubmitResetsFailureStreak(t *testing.T) {
 	m := newTestModel(t, func(w http.ResponseWriter, _ *http.Request) {
 		fmt.Fprint(w, "data: "+`{"choices":[{"delta":{"content":"ok"}}]}`+"\n\n")
 		fmt.Fprint(w, "data: [DONE]\n\n")
 	})
-	m.failKey = tools.BashName + "|make build"
-	m.failStreak = maxToolFailStreak - 1 // one away from firing
+	m.failCounts[tools.BashName+"|make build"] = maxToolFailStreak - 1 // one away from firing
 	mm, _ := m.submit("new goal", "new goal", promptEntry{display: "new goal"})
 	final := mm.(Model)
-	if final.failStreak != 0 || final.failKey != "" {
-		t.Fatalf("submit must reset the failure streak for a new goal, got key=%q streak=%d",
-			final.failKey, final.failStreak)
+	if n := len(final.failCounts); n != 0 {
+		t.Fatalf("submit must reset the failure counts for a new goal, got %d entries left: %+v", n, final.failCounts)
 	}
 }
 
@@ -1966,13 +2015,11 @@ func TestSubmitResetsFailureStreak(t *testing.T) {
 // the repeated-failure backstop's counters.
 func TestClearResetsFailureStreak(t *testing.T) {
 	m := newTestModel(t, func(http.ResponseWriter, *http.Request) {})
-	m.failKey = tools.BashName + "|make build"
-	m.failStreak = maxToolFailStreak - 1
+	m.failCounts[tools.BashName+"|make build"] = maxToolFailStreak - 1
 	out, _ := m.runSlash("/clear")
 	final := out.(Model)
-	if final.failStreak != 0 || final.failKey != "" {
-		t.Fatalf("/clear must reset the failure streak, got key=%q streak=%d",
-			final.failKey, final.failStreak)
+	if n := len(final.failCounts); n != 0 {
+		t.Fatalf("/clear must reset the failure counts, got %d entries left: %+v", n, final.failCounts)
 	}
 }
 

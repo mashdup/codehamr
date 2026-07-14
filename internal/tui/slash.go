@@ -204,8 +204,8 @@ func (m Model) cmdClear(_ []string) (tea.Model, tea.Cmd) {
 	m.streamingEstimate = 0
 	// Drop any queued follow-up: it targeted the conversation just wiped.
 	m.queued = nil
-	// Reset the repeated-failure streak so the next turn starts clean.
-	m.failKey, m.failStreak = "", 0
+	// Reset the repeated-failure counts so the next turn starts clean.
+	m.failCounts = map[string]int{}
 	// Wipe prompt recall too: in-memory ring and on-disk .codehamr/history,
 	// or leftover history would contradict the "fresh start" promise.
 	m.promptHistory = nil
