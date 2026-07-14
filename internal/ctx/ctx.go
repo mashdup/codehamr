@@ -67,15 +67,16 @@ const (
 	ToolOutputCap = 6000
 	ToolHeadTail  = 2000
 	// FixedSystem reserves budget for the embedded prompt + working-dir anchor
-	// (see tui.buildSystem). PROMPT_SYS.md + anchor is ~4930 tokens (the
-	// verification-honesty ledger and trace-read fallback grew it, then the
-	// git/secrets discipline lines and the multi_edit/glob/grep/web_fetch/
-	// todo_write tool descriptions, then the tool-hallucination guard and the
-	// edit_file verbatim-anchor guidance aimed at weaker local models); the
-	// buffer to 5100 keeps prompt edits and long project paths from silently
-	// over-budgeting small-ctx profiles. A test pins this against the live
-	// prompt; bump here when it fails, never relax the assertion.
-	FixedSystem = 5100
+	// (see tui.buildSystem). PROMPT_SYS.md + anchor is ~3500 tokens: it grew
+	// to ~4930 (verification-honesty ledger, trace-read fallback, git/secrets
+	// discipline, the newer tool descriptions, the weak-model tool-hallucination
+	// and edit_file verbatim-anchor guards), then a wording-tightening pass cut
+	// ~30% while keeping every rule — the compaction exists to shrink per-turn
+	// prefill on single-slot local backends. The buffer to 3700 keeps prompt
+	// edits and long project paths from silently over-budgeting small-ctx
+	// profiles. A test pins this against the live prompt; bump here when it
+	// fails, never relax the assertion.
+	FixedSystem = 3700
 	// FixedTools reserves budget for the JSON tool schemas sent every request.
 	// The ten built-in tools serialize to ~1750 tokens; the buffer to 2100
 	// absorbs a schema tweak without over-allocating history. (The `remember`
