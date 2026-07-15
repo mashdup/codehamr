@@ -135,8 +135,23 @@ type streamDelta struct {
 	// models stream in `delta.reasoning` before answer
 	// tokens. Forwarded as EventReasoning to keep the UI animating, but never
 	// round-trips into the assistant message: it has no place in history.
-	Reasoning string     `json:"reasoning,omitempty"`
-	ToolCalls []toolCall `json:"tool_calls,omitempty"`
+	Reasoning string `json:"reasoning,omitempty"`
+	// ReasoningContent is the same thing under LiteLLM's key: LiteLLM
+	// re-encodes any backend's reasoning (including Anthropic thinking
+	// blocks) as `delta.reasoning_content` when proxying the OpenAI
+	// chat-completions shape, rather than the `reasoning` key emitted by
+	// OpenRouter-style providers. reasoningText() below coalesces the two.
+	ReasoningContent string     `json:"reasoning_content,omitempty"`
+	ToolCalls        []toolCall `json:"tool_calls,omitempty"`
+}
+
+// reasoningText returns the incremental reasoning fragment regardless of
+// which key the provider used.
+func (d streamDelta) reasoningText() string {
+	if d.Reasoning != "" {
+		return d.Reasoning
+	}
+	return d.ReasoningContent
 }
 
 // Event is what the TUI consumes. One event per stream update.
@@ -582,8 +597,8 @@ func readSSE(parent context.Context, body io.Reader, budget cloud.BudgetStatus, 
 // slice position, since a call's fragments span chunks whose position need not
 // match the index. Returns false when parent cancelled mid-send.
 func dispatchDelta(parent context.Context, d streamDelta, budget cloud.BudgetStatus, fullContent *strings.Builder, slots map[int]*toolSlot, order *[]int, out chan<- Event) bool {
-	if d.Reasoning != "" {
-		if !sendEvent(parent, out, Event{Kind: EventReasoning, Content: d.Reasoning, Budget: budget}) {
+	if r := d.reasoningText(); r != "" {
+		if !sendEvent(parent, out, Event{Kind: EventReasoning, Content: r, Budget: budget}) {
 			return false
 		}
 	}
