@@ -85,7 +85,7 @@ const (
 	// FixedMemory reserves budget for the project-memory block config.SystemPrompt
 	// prepends to the system prompt on every request (see config.LoadMemory /
 	// AppendMemory). config caps the sent memory at memorySendCapBytes (6000
-	// bytes ~= 1500 tokens); the labelled preamble adds ~130. The reservation to
+	// bytes ~= 1500 tokens); the labelled preamble adds ~95. The reservation to
 	// 1800 covers both with headroom. It's separate from FixedSystem because
 	// memory GROWS at runtime while the embedded prompt is fixed: a test pins that
 	// the byte cap plus preamble fits here, so bump both together, never one alone.

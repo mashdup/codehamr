@@ -56,9 +56,13 @@ const (
 // X-Context-Window header. We leave their on-disk context_size empty:
 // Bootstrap won't seed it, coercion won't default it, and the TUI reads the
 // live value per response. Local Ollama has no header channel, so config.yaml
-// stays canonical there.
+// stays canonical there. `claude`/`codex` are the OAuth subscription profiles
+// the desktop app writes (routed through the codehamr.com proxy, which reports
+// the provider's real window via X-Context-Window like hamrpass).
 var cloudProfileNames = map[string]struct{}{
 	"hamrpass": {},
+	"claude":   {},
+	"codex":    {},
 }
 
 // IsCloudProfile reports whether a profile's context_size is server-managed.
@@ -131,15 +135,11 @@ func Default() *Config {
 // prompt so the model treats it as accumulated project knowledge, not a fresh
 // instruction, and knows the `remember` tool is what grows it.
 const memoryPreamble = "## Project memory\n" +
-	"Durable facts you have learned about THIS project across previous chats, " +
-	"loaded from persistent storage outside the repo. Trust it as ground truth, " +
-	"keep using it, and be PROACTIVE about growing it: whenever the user states " +
-	"or you discover a durable fact (a build/test command, where a subsystem " +
-	"lives, a project convention, the tech stack, how it's deployed or run, a " +
-	"gotcha, a stated preference), call the `remember` tool that same turn so the " +
-	"next chat starts with it too - don't wait to be told to remember. Never claim " +
-	"you noted or recorded something unless you actually called `remember`. Do NOT " +
-	"record transient chatter, secrets, or one-off task state.\n\n"
+	"Durable facts learned about THIS project across past chats, from storage " +
+	"outside the repo. Trust them as ground truth and keep using them. Grow them " +
+	"PROACTIVELY: the moment the user states or you discover something durable, " +
+	"call `remember` that same turn - don't wait to be asked. NEVER claim you " +
+	"recorded something unless you actually called `remember`.\n\n"
 
 // memoryRoot is the out-of-repo directory that holds per-project memory files.
 // os.UserConfigDir is %AppData% on Windows, ~/Library/Application Support on
