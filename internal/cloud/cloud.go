@@ -43,9 +43,12 @@ func Reachable(ctx context.Context, baseURL string) error {
 
 // Headers the proxy sets on every 200. Remaining is the pass fraction
 // [0.0,1.0]; CtxWindow is the live context window, authoritative over config.yaml.
+// OpenAI-compatible backends may send either `X-Context-Window` (our standard)
+// or `context_length` (OpenAI's wire format); accept both.
 const (
 	headerRemaining  = "X-Budget-Remaining"
 	headerCtxWindow  = "X-Context-Window"
+	headerCtxLength  = "context_length"
 	ctxWindowMin     = 1024
 	ctxWindowMaxSane = 8 * 1024 * 1024 // 8M tokens; larger is a bug, not a config
 )
@@ -112,17 +115,24 @@ func (e ErrUnreachable) Unwrap() error { return e.Err }
 // AuthHeader returns the Bearer header a cloud-routed request needs.
 func AuthHeader(token string) string { return "Bearer " + token }
 
-// ContextWindowFromHeaders reads X-Context-Window. Returns 0 when missing,
-// malformed, or out of sane range; the caller reads 0 as "use the fallback".
-// Local Ollama never sets it, so it keeps its config.yaml value.
+// ContextWindowFromHeaders reads X-Context-Window (and falls back to the
+// OpenAI-style `context_length` header). Returns 0 when missing, malformed, or
+// out of sane range; the caller reads 0 as "use the fallback". Local Ollama
+// never sets it, so it keeps its config.yaml value.
 func ContextWindowFromHeaders(h http.Header) int {
-	raw := h.Get(headerCtxWindow)
-	if raw == "" {
-		return 0
+	for _, key := range []string{"llm_provider-x-context-window", headerCtxWindow, headerCtxLength} {
+		raw := h.Get(key)
+		if raw == "" {
+			continue
+		}
+		n, err := strconv.Atoi(raw)
+		if err != nil {
+			continue
+		}
+		if n < ctxWindowMin || n > ctxWindowMaxSane {
+			return 0
+		}
+		return n
 	}
-	n, err := strconv.Atoi(raw)
-	if err != nil || n < ctxWindowMin || n > ctxWindowMaxSane {
-		return 0
-	}
-	return n
+	return 0
 }
