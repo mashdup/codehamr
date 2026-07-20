@@ -95,10 +95,11 @@ var managedProfiles = map[string]Profile{
 // between them. ContextSize is omitempty so server-managed cloud profiles omit
 // it on disk while user-managed profiles round-trip a concrete value.
 type Profile struct {
-	LLM         string `yaml:"llm"`
-	URL         string `yaml:"url"`
-	Key         string `yaml:"key"`
-	ContextSize int    `yaml:"context_size,omitempty"`
+	LLM             string `yaml:"llm"`
+	URL             string `yaml:"url"`
+	Key             string `yaml:"key"`
+	ContextSize     int    `yaml:"context_size,omitempty"`
+	ReasoningEffort string `yaml:"reasoning_effort,omitempty"`
 }
 
 // Config is the on-disk schema at .codehamr/config.yaml. Strict decoding:

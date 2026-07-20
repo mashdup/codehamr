@@ -51,7 +51,7 @@ func TestChatStreamsContent(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	c := New(srv.URL, "test-model", "sk-xyz")
+	c := New(srv.URL, "test-model", "sk-xyz", "")
 	events := collect(c.Chat(context.Background(),
 		[]chmctx.Message{{Role: chmctx.RoleUser, Content: "hi"}}, nil))
 
@@ -102,7 +102,7 @@ func TestChatToolCall(t *testing.T) {
 		})
 	}))
 	defer srv.Close()
-	c := New(srv.URL, "m", "")
+	c := New(srv.URL, "m", "", "")
 	var got *chmctx.ToolCall
 	var final *chmctx.Message
 	for _, e := range collect(c.Chat(context.Background(), nil, nil)) {
@@ -137,7 +137,7 @@ func TestChatToolCallFragmentedArgs(t *testing.T) {
 		})
 	}))
 	defer srv.Close()
-	c := New(srv.URL, "m", "")
+	c := New(srv.URL, "m", "", "")
 	var got *chmctx.ToolCall
 	for _, e := range collect(c.Chat(context.Background(), nil, nil)) {
 		if e.Kind == EventToolCall {
@@ -170,7 +170,7 @@ func TestChatToolArgsStreamLive(t *testing.T) {
 		})
 	}))
 	defer srv.Close()
-	c := New(srv.URL, "m", "")
+	c := New(srv.URL, "m", "", "")
 	var args strings.Builder
 	sawCall := false
 	argsAllBeforeCall := true
@@ -209,7 +209,7 @@ func TestChatToolCallMultipleByIndex(t *testing.T) {
 		})
 	}))
 	defer srv.Close()
-	c := New(srv.URL, "m", "")
+	c := New(srv.URL, "m", "", "")
 	var calls []chmctx.ToolCall
 	for _, e := range collect(c.Chat(context.Background(), nil, nil)) {
 		if e.Kind == EventToolCall {
@@ -242,7 +242,7 @@ func TestChatDispatchesToolCallsOnFinishStop(t *testing.T) {
 		})
 	}))
 	defer srv.Close()
-	c := New(srv.URL, "m", "")
+	c := New(srv.URL, "m", "", "")
 	var got *chmctx.ToolCall
 	var final *chmctx.Message
 	for _, e := range collect(c.Chat(context.Background(), nil, nil)) {
@@ -277,7 +277,7 @@ func TestChatToolCallLateIDPreserved(t *testing.T) {
 		})
 	}))
 	defer srv.Close()
-	c := New(srv.URL, "m", "")
+	c := New(srv.URL, "m", "", "")
 	var got *chmctx.ToolCall
 	for _, e := range collect(c.Chat(context.Background(), nil, nil)) {
 		if e.Kind == EventToolCall {
@@ -303,7 +303,7 @@ func TestChatToolCallMalformedArgsPreservesMarker(t *testing.T) {
 		})
 	}))
 	defer srv.Close()
-	c := New(srv.URL, "m", "")
+	c := New(srv.URL, "m", "", "")
 	var got *chmctx.ToolCall
 	for _, e := range collect(c.Chat(context.Background(), nil, nil)) {
 		if e.Kind == EventToolCall {
@@ -351,7 +351,7 @@ func TestChatSendsStreamIncludeUsage(t *testing.T) {
 		sseOK(w, []string{`{"choices":[{"delta":{"content":"ok"}}]}`})
 	}))
 	defer srv.Close()
-	collect(New(srv.URL, "m", "").Chat(context.Background(), nil, nil))
+	collect(New(srv.URL, "m", "", "").Chat(context.Background(), nil, nil))
 	if !strings.Contains(gotBody, `"stream_options":{"include_usage":true}`) {
 		t.Fatalf("stream_options.include_usage missing from body: %s", gotBody)
 	}
@@ -372,7 +372,7 @@ func TestChatMidStreamErrorFrameSurfacesAsError(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	events := collect(New(srv.URL, "m", "").Chat(context.Background(),
+	events := collect(New(srv.URL, "m", "", "").Chat(context.Background(),
 		[]chmctx.Message{{Role: chmctx.RoleUser, Content: "hi"}}, nil))
 
 	last := events[len(events)-1]
@@ -400,7 +400,7 @@ func TestChatReadsUsageTokens(t *testing.T) {
 	}))
 	defer srv.Close()
 	var tokens, promptTokens int
-	for _, e := range collect(New(srv.URL, "m", "").Chat(context.Background(), nil, nil)) {
+	for _, e := range collect(New(srv.URL, "m", "", "").Chat(context.Background(), nil, nil)) {
 		if e.Kind == EventDone {
 			tokens = e.Tokens
 			promptTokens = e.PromptTokens
@@ -448,7 +448,7 @@ func TestChat401(t *testing.T) {
 		w.WriteHeader(http.StatusUnauthorized)
 	}))
 	defer srv.Close()
-	evs := collect(New(srv.URL, "m", "").Chat(context.Background(), nil, nil))
+	evs := collect(New(srv.URL, "m", "", "").Chat(context.Background(), nil, nil))
 	if len(evs) != 1 || !errors.Is(evs[0].Err, cloud.ErrUnauthorized) {
 		t.Fatalf("want ErrUnauthorized, got %+v", evs)
 	}
@@ -474,7 +474,7 @@ func TestChat401DrainsBodyForConnReuse(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	c := New(srv.URL, "m", "")
+	c := New(srv.URL, "m", "", "")
 	for i := 0; i < 2; i++ {
 		evs := collect(c.Chat(context.Background(), nil, nil))
 		if len(evs) != 1 || !errors.Is(evs[0].Err, cloud.ErrUnauthorized) {
@@ -496,7 +496,7 @@ func TestChat402(t *testing.T) {
 		w.WriteHeader(http.StatusPaymentRequired)
 	}))
 	defer srv.Close()
-	evs := collect(New(srv.URL, "m", "k").Chat(context.Background(), nil, nil))
+	evs := collect(New(srv.URL, "m", "k", "").Chat(context.Background(), nil, nil))
 	if len(evs) != 1 || !errors.Is(evs[0].Err, cloud.ErrBudgetExhausted) {
 		t.Fatalf("want ErrBudgetExhausted, got %+v", evs)
 	}
@@ -507,7 +507,7 @@ func TestChat402(t *testing.T) {
 
 // TestChatUnreachable: transport failure surfaces as ErrUnreachable.
 func TestChatUnreachable(t *testing.T) {
-	c := New("http://127.0.0.1:1", "m", "")
+	c := New("http://127.0.0.1:1", "m", "", "")
 	evs := collect(c.Chat(context.Background(), nil, nil))
 	if len(evs) != 1 {
 		t.Fatalf("want single event, got %d", len(evs))
@@ -527,7 +527,7 @@ func TestChatOtherHTTPError(t *testing.T) {
 		fmt.Fprintln(w, "see logs")
 	}))
 	defer srv.Close()
-	evs := collect(New(srv.URL, "m", "").Chat(context.Background(), nil, nil))
+	evs := collect(New(srv.URL, "m", "", "").Chat(context.Background(), nil, nil))
 	if len(evs) != 1 || evs[0].Kind != EventError {
 		t.Fatalf("want single error event, got %+v", evs)
 	}
@@ -551,7 +551,7 @@ func TestChatStructuredErrorPrefersProviderHint(t *testing.T) {
 		fmt.Fprint(w, `{"error":{"message":"upstream rate limited","type":"rate_limited","upstream_status":429,"provider_hint":"the upstream model is temporarily rate-limited, retry shortly"}}`)
 	}))
 	defer srv.Close()
-	evs := collect(New(srv.URL, "m", "").Chat(context.Background(), nil, nil))
+	evs := collect(New(srv.URL, "m", "", "").Chat(context.Background(), nil, nil))
 	if len(evs) != 1 || evs[0].Kind != EventError {
 		t.Fatalf("want single error event, got %+v", evs)
 	}
@@ -575,7 +575,7 @@ func TestChatStructuredErrorFallsBackToMessage(t *testing.T) {
 		fmt.Fprint(w, `{"error":{"message":"upstream unavailable","type":"upstream_unavailable","upstream_status":503}}`)
 	}))
 	defer srv.Close()
-	evs := collect(New(srv.URL, "m", "").Chat(context.Background(), nil, nil))
+	evs := collect(New(srv.URL, "m", "", "").Chat(context.Background(), nil, nil))
 	if len(evs) != 1 || evs[0].Kind != EventError {
 		t.Fatalf("want single error event, got %+v", evs)
 	}
@@ -604,7 +604,7 @@ func TestReasoningChunksAreEmitted(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	evs := collect(New(srv.URL, "m", "").Chat(context.Background(), nil, nil))
+	evs := collect(New(srv.URL, "m", "", "").Chat(context.Background(), nil, nil))
 	var reasoning, content string
 	var done Event
 	for _, e := range evs {
@@ -656,7 +656,7 @@ func TestChatFallsBackWhenReasoningEffortRejected(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	c := New(srv.URL, "cloud-model", "")
+	c := New(srv.URL, "cloud-model", "", "")
 
 	// First turn: 400 → fallback → success.
 	for _, e := range collect(c.Chat(context.Background(), nil, nil)) {
@@ -710,7 +710,7 @@ func TestProbeChatNoReasoningEffortIsRaceFree(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	c := New(srv.URL, "m", "")
+	c := New(srv.URL, "m", "", "")
 
 	var wg sync.WaitGroup
 	for range 50 {
@@ -748,7 +748,7 @@ func TestChatFallsBackWhenOllamaRejectsThinking(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	c := New(srv.URL, "test-model:latest", "")
+	c := New(srv.URL, "test-model:latest", "", "")
 
 	// First turn: 400 → fallback → success.
 	for _, e := range collect(c.Chat(context.Background(), nil, nil)) {
@@ -799,7 +799,7 @@ func TestChatDoesNotFallBackOnUnrelatedThinking(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	c := New(srv.URL, "some-model", "")
+	c := New(srv.URL, "some-model", "", "")
 	for _, e := range collect(c.Chat(context.Background(), nil, nil)) {
 		_ = e // the turn errors (the 400 is real), that's expected
 	}
@@ -817,7 +817,7 @@ func TestChatDoesNotFallBackOnUnrelatedThinking(t *testing.T) {
 // reading body" on slow local backends. Per-turn context cancellation governs
 // request lifetime; this stops a refactor from reintroducing the wall-clock cap.
 func TestNewHasNoHTTPTimeout(t *testing.T) {
-	c := New("http://example.test", "model", "token")
+	c := New("http://example.test", "model", "token", "")
 	if c.HTTP.Timeout != 0 {
 		t.Fatalf("http.Client.Timeout must be 0 so per-turn context governs SSE lifetime; got %v", c.HTTP.Timeout)
 	}
@@ -872,7 +872,7 @@ func TestChatIdleTimeoutAbortsStalledStream(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	c := New(srv.URL, "m", "")
+	c := New(srv.URL, "m", "", "")
 	c.IdleTimeout = 60 * time.Millisecond
 
 	start := time.Now()
@@ -914,7 +914,7 @@ func TestChatIdleWatchdogResetByFrames(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	c := New(srv.URL, "m", "")
+	c := New(srv.URL, "m", "", "")
 	c.IdleTimeout = 400 * time.Millisecond // > each 250ms gap, < ~500ms total span
 
 	var content strings.Builder
@@ -965,7 +965,7 @@ func TestSummarizeReturnsFinalContent(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	c := New(srv.URL, "m", "")
+	c := New(srv.URL, "m", "", "")
 	out, err := c.Summarize(context.Background(),
 		[]chmctx.Message{{Role: chmctx.RoleUser, Content: "condense this"}})
 	if err != nil {
@@ -988,7 +988,7 @@ func TestSummarizeSurfacesError(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	c := New(srv.URL, "m", "")
+	c := New(srv.URL, "m", "", "")
 	if _, err := c.Summarize(context.Background(), nil); err == nil {
 		t.Fatal("expected an error from a 500 backend")
 	}

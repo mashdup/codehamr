@@ -34,7 +34,7 @@ func compactRunner(t *testing.T, summary string, ctxWindow int) (*Runner, *syncB
 	buf := &syncBuffer{}
 	return &Runner{
 		cfg:         &config.Config{Dir: t.TempDir()},
-		client:      llm.New(srv.URL, "m", ""),
+		client:      llm.New(srv.URL, "m", "", ""),
 		out:         buf,
 		liveCtxSize: ctxWindow,
 		approvals:   map[string]chan approval{},
@@ -119,7 +119,7 @@ func TestMaybeAutoCompactKeepsHistoryOnFailure(t *testing.T) {
 	t.Cleanup(srv.Close)
 
 	const ctxWindow = 65_536
-	r := &Runner{client: llm.New(srv.URL, "m", ""), out: &syncBuffer{}, liveCtxSize: ctxWindow}
+	r := &Runner{client: llm.New(srv.URL, "m", "", ""), out: &syncBuffer{}, liveCtxSize: ctxWindow}
 	big := strings.Repeat("x", 4000)
 	for i := 0; i < 40; i++ {
 		r.history = append(r.history,

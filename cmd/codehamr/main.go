@@ -79,7 +79,7 @@ func main() {
 	}
 
 	p := cfg.ActiveProfile()
-	client := llm.New(cfg.ActiveURL(), p.LLM, p.ResolvedKey())
+	client := llm.New(cfg.ActiveURL(), p.LLM, p.ResolvedKey(), p.ReasoningEffort)
 
 	abs, _ := filepath.Abs(cwd)
 	m := tui.New(cfg, client, abs, version)
@@ -115,7 +115,7 @@ func runJSON() {
 	}
 	applyEnvOverrides(cfg)
 	p := cfg.ActiveProfile()
-	client := llm.New(cfg.ActiveURL(), p.LLM, p.ResolvedKey())
+	client := llm.New(cfg.ActiveURL(), p.LLM, p.ResolvedKey(), p.ReasoningEffort)
 	abs, _ := filepath.Abs(cwd)
 	if err := protocol.Run(cfg, client, abs, version); err != nil {
 		log.Fatalf("codehamr: %v", err)

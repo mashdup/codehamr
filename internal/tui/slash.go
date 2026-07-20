@@ -188,7 +188,7 @@ func (m *Model) confirmActive(profile string) tea.Cmd {
 // endpoint, fresh slate.
 func (m *Model) rebuildClient() {
 	p := m.cfg.ActiveProfile()
-	m.cli = llm.New(m.cfg.ActiveURL(), p.LLM, p.ResolvedKey())
+	m.cli = llm.New(m.cfg.ActiveURL(), p.LLM, p.ResolvedKey(), p.ReasoningEffort)
 	// Drop the prior profile's cached BudgetStatus. m.budget has no profile
 	// association, so without this reset the footer keeps rendering the old
 	// "88% pass" segment after switching to a local profile that emits no

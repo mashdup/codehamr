@@ -42,7 +42,7 @@ func newTestModel(t *testing.T, handler http.HandlerFunc) Model {
 	if err := cfg.Save(); err != nil {
 		t.Fatal(err)
 	}
-	client := llm.New(srv.URL, cfg.ActiveProfile().LLM, "")
+	client := llm.New(srv.URL, cfg.ActiveProfile().LLM, "", "")
 	m := New(cfg, client, t.TempDir(), "test")
 	// give it a size so view() doesn't panic
 	sized, _ := m.Update(tea.WindowSizeMsg{Width: 100, Height: 30})
@@ -56,7 +56,7 @@ func newTestModel(t *testing.T, handler http.HandlerFunc) Model {
 func TestSystemPromptIncludesWorkingDirAndInvestigateRule(t *testing.T) {
 	cfg, _, _ := config.Bootstrap(t.TempDir())
 	projectDir := "/workspaces/codehamr"
-	m := New(cfg, llm.New("http://x", cfg.ActiveProfile().LLM, ""), projectDir, "test")
+	m := New(cfg, llm.New("http://x", cfg.ActiveProfile().LLM, "", ""), projectDir, "test")
 	if !strings.Contains(m.system, "investigate it yourself, never ask the user to paste") {
 		t.Fatalf("system prompt missing the investigate-files-yourself rule:\n%s", m.system)
 	}
@@ -73,7 +73,7 @@ func TestSystemPromptIncludesWorkingDirAndInvestigateRule(t *testing.T) {
 // don't loosen the assertion.
 func TestSystemPromptFitsFixedSystemReservation(t *testing.T) {
 	cfg, _, _ := config.Bootstrap(t.TempDir())
-	m := New(cfg, llm.New("http://x", cfg.ActiveProfile().LLM, ""), "/workspaces/codehamr", "test")
+	m := New(cfg, llm.New("http://x", cfg.ActiveProfile().LLM, "", ""), "/workspaces/codehamr", "test")
 	cost := chmctx.Message{Role: chmctx.RoleSystem, Content: m.system}.Tokens()
 	if cost > chmctx.FixedSystem {
 		t.Fatalf("system prompt costs %d tokens, FixedSystem reserves only %d - "+
@@ -1410,7 +1410,7 @@ func TestStatusBarOmitsBudgetWithoutHeaders(t *testing.T) {
 // WindowSizeMsg arrives, View must not panic or emit garbled layout.
 func TestViewHandlesZeroWidth(t *testing.T) {
 	cfg, _, _ := config.Bootstrap(t.TempDir())
-	m := New(cfg, llm.New("http://x", cfg.ActiveProfile().LLM, ""), t.TempDir(), "test")
+	m := New(cfg, llm.New("http://x", cfg.ActiveProfile().LLM, "", ""), t.TempDir(), "test")
 	m.width = 0 // simulate no WindowSizeMsg yet
 	if got := m.View(); got != "" {
 		t.Fatalf("zero-width view should be empty, got %q", got)
@@ -2879,7 +2879,7 @@ func TestPopoverSelectionStaysVisible(t *testing.T) {
 // reach the outbox (drained via tea.Println by the Update wrapper in production).
 func TestSplashEmittedOnFirstSize(t *testing.T) {
 	cfg, _, _ := config.Bootstrap(t.TempDir())
-	m := New(cfg, llm.New("http://x", cfg.ActiveProfile().LLM, ""), t.TempDir(), "test")
+	m := New(cfg, llm.New("http://x", cfg.ActiveProfile().LLM, "", ""), t.TempDir(), "test")
 	out, _ := m.update(tea.WindowSizeMsg{Width: 100, Height: 30})
 	om := out.(Model)
 	joined := stripANSI(strings.Join(om.outbox, "\n"))

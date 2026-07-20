@@ -16,7 +16,7 @@ import (
 // status bar off-screen or wraps mid-prompt.
 func TestResizeKeepsPromptInsideTerminal(t *testing.T) {
 	cfg, _, _ := config.Bootstrap(t.TempDir())
-	m := New(cfg, llm.New("http://x", cfg.ActiveProfile().LLM, ""), t.TempDir(), "test")
+	m := New(cfg, llm.New("http://x", cfg.ActiveProfile().LLM, "", ""), t.TempDir(), "test")
 	var mm tea.Model = m
 
 	mx := m
@@ -44,7 +44,7 @@ func TestResizeKeepsPromptInsideTerminal(t *testing.T) {
 // output; wiping it would feel destructive. Only the splash is printed.
 func TestFirstResizeDoesNotClearScreen(t *testing.T) {
 	cfg, _, _ := config.Bootstrap(t.TempDir())
-	m := New(cfg, llm.New("http://x", cfg.ActiveProfile().LLM, ""), t.TempDir(), "test")
+	m := New(cfg, llm.New("http://x", cfg.ActiveProfile().LLM, "", ""), t.TempDir(), "test")
 
 	_, cmd := m.Update(tea.WindowSizeMsg{Width: 80, Height: 24})
 	if cmdYieldsClearScreen(cmd) {
@@ -59,7 +59,7 @@ func TestFirstResizeDoesNotClearScreen(t *testing.T) {
 // streaming buffer survives (re-wrapped on resume).
 func TestWidthChangeSuppressesView(t *testing.T) {
 	cfg, _, _ := config.Bootstrap(t.TempDir())
-	m := New(cfg, llm.New("http://x", cfg.ActiveProfile().LLM, ""), t.TempDir(), "test")
+	m := New(cfg, llm.New("http://x", cfg.ActiveProfile().LLM, "", ""), t.TempDir(), "test")
 	var mm tea.Model = m
 
 	mm, _ = mm.Update(tea.WindowSizeMsg{Width: 80, Height: 24})
@@ -95,7 +95,7 @@ func TestWidthChangeSuppressesView(t *testing.T) {
 // soft-wrap into stair-steps.
 func TestResizeSettleReplaysScrollbackAtNewWidth(t *testing.T) {
 	cfg, _, _ := config.Bootstrap(t.TempDir())
-	m := New(cfg, llm.New("http://x", cfg.ActiveProfile().LLM, ""), t.TempDir(), "test")
+	m := New(cfg, llm.New("http://x", cfg.ActiveProfile().LLM, "", ""), t.TempDir(), "test")
 	var mm tea.Model = m
 
 	mm, _ = mm.Update(tea.WindowSizeMsg{Width: 80, Height: 24})
@@ -136,7 +136,7 @@ func TestResizeSettleReplaysScrollbackAtNewWidth(t *testing.T) {
 // else the chrome flickers back mid-drag on each stale tick.
 func TestStaleResizeSettleIsDiscarded(t *testing.T) {
 	cfg, _, _ := config.Bootstrap(t.TempDir())
-	m := New(cfg, llm.New("http://x", cfg.ActiveProfile().LLM, ""), t.TempDir(), "test")
+	m := New(cfg, llm.New("http://x", cfg.ActiveProfile().LLM, "", ""), t.TempDir(), "test")
 	var mm tea.Model = m
 
 	mm, _ = mm.Update(tea.WindowSizeMsg{Width: 100, Height: 30})
@@ -165,7 +165,7 @@ func TestStaleResizeSettleIsDiscarded(t *testing.T) {
 // clearing the screen for a non-event flickers for no benefit.
 func TestRedundantResizeIsNoOp(t *testing.T) {
 	cfg, _, _ := config.Bootstrap(t.TempDir())
-	m := New(cfg, llm.New("http://x", cfg.ActiveProfile().LLM, ""), t.TempDir(), "test")
+	m := New(cfg, llm.New("http://x", cfg.ActiveProfile().LLM, "", ""), t.TempDir(), "test")
 	var mm tea.Model = m
 
 	mm, _ = mm.Update(tea.WindowSizeMsg{Width: 80, Height: 24})
@@ -181,7 +181,7 @@ func TestRedundantResizeIsNoOp(t *testing.T) {
 // immediate cmd is the debounce tick; the clear lands on settle.
 func TestWidenResizeAlsoSuppresses(t *testing.T) {
 	cfg, _, _ := config.Bootstrap(t.TempDir())
-	m := New(cfg, llm.New("http://x", cfg.ActiveProfile().LLM, ""), t.TempDir(), "test")
+	m := New(cfg, llm.New("http://x", cfg.ActiveProfile().LLM, "", ""), t.TempDir(), "test")
 	var mm tea.Model = m
 
 	mm, _ = mm.Update(tea.WindowSizeMsg{Width: 60, Height: 24})
@@ -201,7 +201,7 @@ func TestWidenResizeAlsoSuppresses(t *testing.T) {
 // hardening path stays reserved for width changes.
 func TestHeightOnlyResizeDoesNotClear(t *testing.T) {
 	cfg, _, _ := config.Bootstrap(t.TempDir())
-	m := New(cfg, llm.New("http://x", cfg.ActiveProfile().LLM, ""), t.TempDir(), "test")
+	m := New(cfg, llm.New("http://x", cfg.ActiveProfile().LLM, "", ""), t.TempDir(), "test")
 	var mm tea.Model = m
 
 	mm, _ = mm.Update(tea.WindowSizeMsg{Width: 80, Height: 24})

@@ -56,6 +56,7 @@ type command struct {
 	Scope     string     `json:"scope,omitempty"`     // approve: once|session
 	Name      string     `json:"name,omitempty"`      // set_model
 	Mode      string     `json:"mode,omitempty"`      // set_mode: ask|auto
+	Effort    string     `json:"effort,omitempty"`    // set_reasoning_effort: low|medium|high
 	Selection *int       `json:"selection,omitempty"` // ask_user_response: option index, or -1 for custom text
 	Custom    string     `json:"custom,omitempty"`    // ask_user_response: the typed custom answer when selection is -1
 }
@@ -77,10 +78,11 @@ type imageAtt struct {
 // modelInfo is one profile as shown to the harness. The key never crosses the
 // wire: the GUI edits config.yaml directly when it needs to manage keys.
 type modelInfo struct {
-	Name        string `json:"name"`
-	LLM         string `json:"llm"`
-	URL         string `json:"url"`
-	ContextSize int    `json:"contextSize"`
+	Name            string `json:"name"`
+	LLM             string `json:"llm"`
+	URL             string `json:"url"`
+	ContextSize     int    `json:"contextSize"`
+	ReasoningEffort string `json:"reasoningEffort,omitempty"`
 }
 
 // event is every agent→client line, one flat struct with omitempty so each
@@ -262,9 +264,23 @@ func (r *Runner) dispatch(cmd command) {
 			return
 		}
 		p := r.cfg.ActiveProfile()
-		r.client = llm.New(r.cfg.ActiveURL(), p.LLM, p.ResolvedKey())
+		r.client = llm.New(r.cfg.ActiveURL(), p.LLM, p.ResolvedKey(), p.ReasoningEffort)
 		r.liveCtxSize = 0 // new endpoint, stale header value no longer applies
 		r.noImages = false
+		r.emitModels("models")
+	case "set_reasoning_effort":
+		if r.isBusy() {
+			r.emitError("cannot switch reasoning effort mid-turn", false)
+			return
+		}
+		p := r.cfg.ActiveProfile()
+		p.ReasoningEffort = cmd.Effort
+		if err := r.cfg.Save(); err != nil {
+			r.emitError(err.Error(), false)
+			return
+		}
+		// Rebuild client with new reasoning effort
+		r.client = llm.New(r.cfg.ActiveURL(), p.LLM, p.ResolvedKey(), p.ReasoningEffort)
 		r.emitModels("models")
 	case "get_models":
 		r.emitModels("models")
@@ -1325,7 +1341,7 @@ func (r *Runner) emitModels(typ string) {
 	for _, name := range names {
 		p := r.cfg.Models[name]
 		models = append(models, modelInfo{
-			Name: name, LLM: p.LLM, URL: p.URL, ContextSize: p.ContextSize,
+			Name: name, LLM: p.LLM, URL: p.URL, ContextSize: p.ContextSize, ReasoningEffort: p.ReasoningEffort,
 		})
 	}
 	e := event{V: V, Type: typ, Version: r.version, Active: r.cfg.Active, Models: models}

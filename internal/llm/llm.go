@@ -258,6 +258,10 @@ type Client struct {
 	// A field, not a bare const, only so tests can shorten it; New sets the
 	// default and nothing else writes it.
 	IdleTimeout time.Duration
+	// ReasoningEffort sets the reasoning_effort field on chat requests (OpenAI
+	// o-series models). Valid: "low", "medium", "high", "off" (omit the field
+	// entirely). Empty (default) means "high".
+	ReasoningEffort string
 	// noReasoningEffort goes true once the server 400s on reasoning for this
 	// model (newer OpenAI models reject tools + reasoning_effort here, pushing
 	// that combo onto /v1/responses; Ollama rejects it on non-thinking models).
@@ -276,14 +280,15 @@ type Client struct {
 // legitimate SSE stream mid-flight on slow local backends. tui.Model's turnCtx
 // is the single cancellation source; connect-level safety (DNS/TCP) is already
 // bounded by Go's default Dialer (30s).
-func New(base, model, token string) *Client {
+func New(base, model, token, reasoningEffort string) *Client {
 	return &Client{
-		BaseURL:     strings.TrimRight(base, "/"),
-		ChatURL:     chatCompletionsURL(base),
-		Model:       model,
-		Token:       token,
-		HTTP:        &http.Client{},
-		IdleTimeout: idleTimeoutFromEnv(),
+		BaseURL:         strings.TrimRight(base, "/"),
+		ChatURL:         chatCompletionsURL(base),
+		Model:           model,
+		Token:           token,
+		HTTP:            &http.Client{},
+		IdleTimeout:     idleTimeoutFromEnv(),
+		ReasoningEffort: reasoningEffort,
 	}
 }
 
@@ -431,6 +436,15 @@ func sendEvent(parent context.Context, out chan<- Event, e Event) bool {
 	}
 }
 
+// reasoningEffort returns the configured reasoning_effort, defaulting to "high"
+// when the field is empty (the legacy case before ReasoningEffort was user-facing).
+func (c *Client) reasoningEffort() string {
+	if c.ReasoningEffort == "" {
+		return "high"
+	}
+	return c.ReasoningEffort
+}
+
 // sendChat POSTs the request and returns the response on 200. On failure it
 // returns the Event the caller forwards, populated with Kind/Err/Budget. The
 // body is closed on every non-200 branch; 200 leaves it open for the caller.
@@ -441,7 +455,7 @@ func (c *Client) sendChat(parent context.Context, msgs []chmctx.Message, tools [
 		Tools:           tools,
 		Stream:          true,
 		StreamOptions:   &streamOptions{IncludeUsage: true},
-		ReasoningEffort: "high",
+		ReasoningEffort: c.reasoningEffort(),
 	})
 	if err != nil {
 		return nil, &Event{Kind: EventError, Err: err, Budget: budget}
