@@ -60,6 +60,45 @@ func runToolCall(parent context.Context, call chmctx.ToolCall) tea.Cmd {
 	}
 }
 
+// compactionMsg carries the result of an auto-compaction summarisation back to
+// Update, tagged with the turnCtx it was issued against so a Ctrl+C'd turn's
+// late summary is dropped (same staleness guard as toolResultMsg). summary is
+// empty on failure/cancel; the handler then leaves history untouched and starts
+// the turn on the raw (uncompacted) window rather than losing context.
+type compactionMsg struct {
+	summary string
+	err     error
+	split   int
+	turnCtx context.Context
+}
+
+// summarizeCmd runs the compaction summarisation off the UI goroutine. It builds
+// the summariser request from a fixed instruction plus the rendered older span,
+// calls the blocking llm.Summarize, and reports back via compactionMsg tagged
+// with parent so a superseded turn's result is ignored.
+func summarizeCmd(parent context.Context, cli *llm.Client, older []chmctx.Message, split int) tea.Cmd {
+	return func() tea.Msg {
+		msgs := []chmctx.Message{
+			{Role: chmctx.RoleSystem, Content: compactionInstruction},
+			{Role: chmctx.RoleUser, Content: chmctx.RenderForSummary(older)},
+		}
+		summary, err := cli.Summarize(parent, msgs)
+		return compactionMsg{summary: summary, err: err, split: split, turnCtx: parent}
+	}
+}
+
+// compactionInstruction steers the summariser: a dense, factual recap the main
+// model can keep working from, not a chat pleasantry. It mirrors the recap
+// contract in the compaction plan (topics, decisions, established context,
+// pending work) and demands concrete identifiers survive since the summary
+// replaces the only record of them.
+const compactionInstruction = "You are compacting an in-progress coding session so it fits the context window. " +
+	"Summarise the transcript below into a dense, factual recap the assistant can keep working from. " +
+	"Preserve: the user's goals and requests; decisions and approaches taken; files, functions, and " +
+	"commands touched (name them exactly); key findings from tool output; and any unfinished work or " +
+	"open questions. Omit pleasantries and redundant detail. Write it as notes to your future self, not a " +
+	"message to the user. Do not invent anything not present in the transcript."
+
 // errorMessage maps a stream error into a one-line TUI hint, same format across
 // all profiles.
 func (m Model) errorMessage(e llm.Event) string {

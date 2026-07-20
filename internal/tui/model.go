@@ -38,6 +38,7 @@ const (
 	phaseThinking
 	phaseStreaming
 	phaseRunning
+	phaseCompacting
 )
 
 func (p phase) active() bool { return p != phaseIdle }
@@ -50,6 +51,8 @@ func (p phase) label() string {
 		return "generating"
 	case phaseRunning:
 		return "running"
+	case phaseCompacting:
+		return "compacting"
 	}
 	return ""
 }
@@ -495,6 +498,9 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.phase = phaseThinking
 		return m, m.startChat()
 
+	case compactionMsg:
+		return m.handleCompaction(msg)
+
 	case quitArmResetMsg:
 		if !m.quitArmedAt.IsZero() && time.Now().After(m.quitArmedAt) {
 			m.quitArmedAt = time.Time{}
@@ -632,12 +638,68 @@ func (m *Model) installTurnContext() {
 // beginTurn installs a fresh per-turn context, flips phase to thinking, and
 // returns the chat stream-reader Cmd. Every path starting a new LLM round
 // funnels through here so one m.cancel() cancels the whole cascade.
+//
+// Before dialing the model it checks whether the conversation has outgrown the
+// compaction trigger (see maybeCompact): if so it summarises the older history
+// first and the turn's chat round resumes from the compaction handler, so a long
+// session shrinks its own backlog instead of letting Pack silently evict it.
 func (m *Model) beginTurn() tea.Cmd {
 	m.installTurnContext()
 	m.turnStart = time.Now()
 	m.lastOutcome = outcomeNone // the new run replaces the prior frozen summary
+	if cmd := m.maybeCompact(); cmd != nil {
+		return cmd
+	}
 	m.phase = phaseThinking
 	return m.startChat()
+}
+
+// maybeCompact fires an auto-compaction summarisation when history has grown
+// past the trigger fraction of the active window (see ctx.NeedsCompaction). It
+// carves off the older span, flips phase to "compacting", and returns the
+// summarizeCmd; the compactionMsg handler splices the summary back in and
+// resumes the chat round. Returns nil (and leaves phase alone) when compaction
+// isn't needed or nothing can be peeled off, so the caller starts the turn
+// normally. Never blocks the UI: the summarisation runs off-goroutine like every
+// other LLM call.
+func (m *Model) maybeCompact() tea.Cmd {
+	ctxSize := m.activeContextSize()
+	if !chmctx.NeedsCompaction(m.history, ctxSize) {
+		return nil
+	}
+	split := chmctx.SplitForCompaction(m.history, chmctx.CompactionKeepRecent(ctxSize))
+	if split <= 0 {
+		return nil
+	}
+	older := append([]chmctx.Message(nil), m.history[:split]...)
+	dbgWritef("compaction", "auto-compaction triggered: history=%d tok, summarising %d of %d messages",
+		chmctx.HistoryTokens(m.history), split, len(m.history))
+	m.phase = phaseCompacting
+	return summarizeCmd(m.turnCtx, m.cli, older, split)
+}
+
+// handleCompaction consumes the auto-compaction result and starts (or, on
+// failure, still starts) the chat round the compaction preceded. On success it
+// splices the summary in for the older span and prints a one-line notice; on
+// error or cancellation it leaves history intact and proceeds on the raw window,
+// since Pack's over-budget guarantees keep the request legal either way. A stale
+// result (the turn was Ctrl+C'd and superseded) is dropped, exactly like
+// toolResultMsg: acting on it would summarise into a turn the user abandoned.
+func (m Model) handleCompaction(msg compactionMsg) (tea.Model, tea.Cmd) {
+	if msg.turnCtx != m.turnCtx {
+		return m, nil
+	}
+	if msg.err != nil || strings.TrimSpace(msg.summary) == "" {
+		dbgWritef("compaction", "compaction skipped (%v); proceeding on the raw window", msg.err)
+	} else {
+		before := len(m.history)
+		m.history = chmctx.ApplyCompaction(m.history, msg.split, msg.summary)
+		dbgWritef("compaction", "compacted %d messages into a summary; history now %d messages, %d tok",
+			before-len(m.history)+1, len(m.history), chmctx.HistoryTokens(m.history))
+		m.appendLine(styleDim.Render("⤺ compacted earlier conversation to fit the context window"))
+	}
+	m.phase = phaseThinking
+	return m, m.startChat()
 }
 
 // appendUserTurn appends a user-role message to history and starts a turn.

@@ -3419,3 +3419,118 @@ func drainFinal(t *testing.T, m Model, prompt string) Model {
 	out, _ := drain(mm, cmd)
 	return out.(Model)
 }
+
+// TestMaybeCompactTriggersOnLargeHistory: a history over the compaction trigger
+// flips phase to compacting and returns a summarize cmd; a small one doesn't.
+func TestMaybeCompactTriggersOnLargeHistory(t *testing.T) {
+	m := newTestModel(t, func(http.ResponseWriter, *http.Request) {})
+	m.installTurnContext()
+	m.liveContextSize[m.cfg.Active] = 65_536
+	// Small history: no compaction.
+	m.history = []chmctx.Message{{Role: chmctx.RoleUser, Content: "hi"}}
+	if cmd := m.maybeCompact(); cmd != nil {
+		t.Fatal("small history must not trigger compaction")
+	}
+	// Large history over the trigger.
+	big := strings.Repeat("x", 4000)
+	for i := 0; i < 40; i++ {
+		m.history = append(m.history,
+			chmctx.Message{Role: chmctx.RoleUser, Content: big},
+			chmctx.Message{Role: chmctx.RoleAssistant, Content: big})
+	}
+	if !chmctx.NeedsCompaction(m.history, 65_536) {
+		t.Fatal("precondition: history should exceed the trigger")
+	}
+	cmd := m.maybeCompact()
+	if cmd == nil {
+		t.Fatal("large history must trigger compaction")
+	}
+	if m.phase != phaseCompacting {
+		t.Fatalf("phase must be compacting, got %v", m.phase)
+	}
+}
+
+// TestHandleCompactionSplicesSummary: a successful compactionMsg replaces the
+// older span with a single summary message and then starts the chat round.
+func TestHandleCompactionSplicesSummary(t *testing.T) {
+	m := newTestModel(t, sseOKHandler(`{"choices":[{"delta":{"content":"ok"}}],"usage":{"completion_tokens":1}}`))
+	m.installTurnContext()
+	m.history = []chmctx.Message{
+		{Role: chmctx.RoleUser, Content: "old task"},
+		{Role: chmctx.RoleAssistant, Content: "old work"},
+		{Role: chmctx.RoleUser, Content: "recent task"},
+	}
+	out, cmd := m.handleCompaction(compactionMsg{
+		summary: "did the old work", split: 2, turnCtx: m.turnCtx,
+	})
+	mm := out.(Model)
+	if cmd == nil {
+		t.Fatal("handleCompaction must start the chat round")
+	}
+	if mm.phase != phaseThinking {
+		t.Fatalf("phase must be thinking after compaction, got %v", mm.phase)
+	}
+	if len(mm.history) != 2 {
+		t.Fatalf("history should be summary + 1 recent, got %d", len(mm.history))
+	}
+	if !strings.HasPrefix(mm.history[0].Content, chmctx.SummaryPrefix) {
+		t.Fatalf("first message must be the summary, got %q", mm.history[0].Content)
+	}
+	if mm.history[1].Content != "recent task" {
+		t.Fatal("recent span must be preserved")
+	}
+}
+
+// TestHandleCompactionFailureKeepsHistory: a failed/blank summary leaves history
+// untouched and still starts the round on the raw window.
+func TestHandleCompactionFailureKeepsHistory(t *testing.T) {
+	m := newTestModel(t, sseOKHandler(`{"choices":[{"delta":{"content":"ok"}}]}`))
+	m.installTurnContext()
+	orig := []chmctx.Message{
+		{Role: chmctx.RoleUser, Content: "task"},
+		{Role: chmctx.RoleAssistant, Content: "work"},
+	}
+	m.history = append([]chmctx.Message(nil), orig...)
+	out, cmd := m.handleCompaction(compactionMsg{
+		err: context.DeadlineExceeded, split: 1, turnCtx: m.turnCtx,
+	})
+	mm := out.(Model)
+	if cmd == nil {
+		t.Fatal("must still start the round after a failed compaction")
+	}
+	if len(mm.history) != len(orig) {
+		t.Fatalf("failed compaction must not drop history: got %d, want %d", len(mm.history), len(orig))
+	}
+	if mm.phase != phaseThinking {
+		t.Fatalf("phase must be thinking, got %v", mm.phase)
+	}
+}
+
+// TestHandleCompactionDropsStaleResult: a compactionMsg from a superseded turn
+// (turnCtx mismatch) is ignored.
+func TestHandleCompactionDropsStaleResult(t *testing.T) {
+	m := newTestModel(t, func(http.ResponseWriter, *http.Request) {})
+	m.installTurnContext()
+	m.history = []chmctx.Message{{Role: chmctx.RoleUser, Content: "task"}}
+	out, cmd := m.handleCompaction(compactionMsg{
+		summary: "x", split: 1, turnCtx: context.Background(),
+	})
+	if cmd != nil {
+		t.Fatal("a stale compaction result must be dropped (nil cmd)")
+	}
+	if len(out.(Model).history) != 1 {
+		t.Fatal("stale compaction must not touch history")
+	}
+}
+
+// sseOKHandler returns a handler that streams the given SSE data chunks followed
+// by [DONE], the minimal server the compaction tests need.
+func sseOKHandler(chunks ...string) http.HandlerFunc {
+	return func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		for _, c := range chunks {
+			fmt.Fprintf(w, "data: %s\n\n", c)
+		}
+		fmt.Fprint(w, "data: [DONE]\n\n")
+	}
+}

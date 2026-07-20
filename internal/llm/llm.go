@@ -332,6 +332,33 @@ func (c *Client) Probe(parent context.Context) (ProbeResult, error) {
 	}, nil
 }
 
+// Summarize runs one non-tool chat round and returns the whole assistant reply
+// as a single string, blocking until the stream ends. It's the auto-compaction
+// path: the caller hands it a system instruction plus the transcript to condense
+// and gets prose back, no tool calls, no UI streaming. Reuses the streaming
+// transport (postChat's reasoning_effort fallback and the idle watchdog come for
+// free) but collects the events instead of forwarding them. Returns the parent's
+// context error on cancellation and the stream error on any backend failure, so
+// the caller can leave history untouched and simply skip this compaction.
+func (c *Client) Summarize(parent context.Context, messages []chmctx.Message) (string, error) {
+	ch := c.Chat(parent, messages, nil)
+	var final string
+	for e := range ch {
+		switch e.Kind {
+		case EventDone:
+			if e.Final != nil {
+				final = e.Final.Content
+			}
+		case EventError:
+			return "", e.Err
+		}
+	}
+	if err := parent.Err(); err != nil {
+		return "", err
+	}
+	return final, nil
+}
+
 // Chat streams an assistant response on the returned channel, closing it when
 // the stream ends. Reasoning runs at `high` effort by default; if the server
 // rejects the tools + reasoning_effort combo (newer OpenAI models do), postChat

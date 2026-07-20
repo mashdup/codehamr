@@ -950,3 +950,46 @@ func TestToWireParseErrorArgsStayValidJSON(t *testing.T) {
 		t.Fatalf("arguments must stay valid JSON to avoid poisoning the session: %q", args)
 	}
 }
+
+// TestSummarizeReturnsFinalContent: Summarize drains the stream and returns the
+// whole assistant reply as one string, sending no tools.
+func TestSummarizeReturnsFinalContent(t *testing.T) {
+	var gotBody string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		b, _ := io.ReadAll(r.Body)
+		gotBody = string(b)
+		sseOK(w, []string{
+			`{"choices":[{"delta":{"content":"recap "}}]}`,
+			`{"choices":[{"delta":{"content":"of work"}}],"usage":{"completion_tokens":3}}`,
+		})
+	}))
+	defer srv.Close()
+
+	c := New(srv.URL, "m", "")
+	out, err := c.Summarize(context.Background(),
+		[]chmctx.Message{{Role: chmctx.RoleUser, Content: "condense this"}})
+	if err != nil {
+		t.Fatalf("Summarize error: %v", err)
+	}
+	if out != "recap of work" {
+		t.Fatalf("summary = %q, want %q", out, "recap of work")
+	}
+	if strings.Contains(gotBody, `"tools"`) {
+		t.Fatalf("Summarize must not send tools: %s", gotBody)
+	}
+}
+
+// TestSummarizeSurfacesError: a backend error is returned so the caller can skip
+// the compaction and leave history intact.
+func TestSummarizeSurfacesError(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(500)
+		fmt.Fprint(w, `{"error":{"message":"boom"}}`)
+	}))
+	defer srv.Close()
+
+	c := New(srv.URL, "m", "")
+	if _, err := c.Summarize(context.Background(), nil); err == nil {
+		t.Fatal("expected an error from a 500 backend")
+	}
+}

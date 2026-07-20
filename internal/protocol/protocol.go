@@ -110,6 +110,7 @@ type event struct {
 	Mode          string         `json:"mode,omitempty"`          // ready, mode
 	Prompt        string         `json:"prompt,omitempty"`        // ask_user
 	Options       []string       `json:"options,omitempty"`       // ask_user
+	Auto          *bool          `json:"auto,omitempty"`          // compacted: fired automatically mid-turn (turn continues), not by the /compact command
 }
 
 type usage struct {
@@ -338,6 +339,15 @@ func (r *Runner) runTurn(text string, images []imageAtt) {
 	preTurnLen := len(r.history)
 	r.history = append(r.history, user)
 
+	// Auto-compaction: a long session that has crept past the trigger fraction
+	// of the window gets its older history summarised into a single message
+	// before the round is packed, so Pack never has to silently evict the oldest
+	// turns. Best-effort and cancellable (it runs on turnCtx); on failure the
+	// history is left intact and the turn proceeds on the raw window. Runs after
+	// the user turn is appended so the new prompt is always in the kept-verbatim
+	// recent span.
+	r.maybeAutoCompact(turnCtx)
+
 	var lastUsage *usage
 	rounds := 0
 	// Loop backstops — the TUI has these; the GUI driver deliberately shipped
@@ -490,11 +500,18 @@ func (r *Runner) finishTurn(e event) {
 
 // ---------------------------------------------------------------------------
 // Compact: summarize the conversation into a single message, reclaiming
-// context window on long sessions. Runs as a cancellable turn (busy slot + turn
-// context) so the Stop button and mid-turn guards apply, calling the active
-// model with a summarization prompt over a rendered transcript. On success the
-// whole history is replaced by one summary message and a `compacted` event is
-// emitted; on failure the history is left untouched.
+// context window on long sessions. Two entry points share the summariser:
+//
+//   - runCompact: the manual `compact` command. Runs as a cancellable turn
+//     (busy slot + turn context) so the Stop button and mid-turn guards apply,
+//     summarises the WHOLE history, and emits a `compacted` event.
+//   - maybeAutoCompact: called at the top of every turn. When the session has
+//     grown past ctx.NeedsCompaction's trigger it summarises the OLDER span
+//     only, keeping the most recent turns verbatim, so the current prompt and
+//     its immediate context survive untouched.
+//
+// Both leave history unchanged on any failure: compaction must never drop
+// context it couldn't first summarise.
 // ---------------------------------------------------------------------------
 
 const compactSystemPrompt = "You are compacting a coding session to save context window. " +
@@ -506,6 +523,59 @@ const compactSystemPrompt = "You are compacting a coding session to save context
 // compactedPrefix marks the summary message in history so a human reading
 // session.json (or a later compaction) can tell it apart from a real user turn.
 const compactedPrefix = "[Summary of the earlier conversation, compacted to save context]\n\n"
+
+// summarize runs one non-tool round over the given transcript and returns the
+// trimmed summary. Shared by runCompact and maybeAutoCompact. Returns the
+// context error on cancellation and the stream error on backend failure so each
+// caller can decide how to react; an empty (whitespace-only) summary comes back
+// as ("", nil) and callers treat it as "leave history alone".
+func (r *Runner) summarize(turnCtx context.Context, transcript string) (string, error) {
+	msgs := []chmctx.Message{
+		{Role: chmctx.RoleSystem, Content: compactSystemPrompt},
+		{Role: chmctx.RoleUser, Content: "Conversation to summarize:\n\n" + transcript},
+	}
+	summary, err := r.client.Summarize(turnCtx, msgs)
+	if err != nil {
+		return "", err
+	}
+	return strings.TrimSpace(summary), nil
+}
+
+// maybeAutoCompact summarises the older span of a long history in place, keeping
+// the most recent turns verbatim, when the session has grown past the
+// compaction trigger. It runs inside the active turn (turnCtx), synchronously,
+// before the round is packed. Every failure path is a silent no-op that leaves
+// history untouched: a missed compaction only means Pack does its usual
+// budget-trimming this turn, never a lost turn. A `compacted` event is emitted
+// on success so the harness can surface the reclaim.
+func (r *Runner) maybeAutoCompact(turnCtx context.Context) {
+	ctxSize := r.activeContextSize()
+	if !chmctx.NeedsCompaction(r.history, ctxSize) {
+		return
+	}
+	split := chmctx.SplitForCompaction(r.history, chmctx.CompactionKeepRecent(ctxSize))
+	if split <= 0 {
+		return
+	}
+	older := r.history[:split]
+	summary, err := r.summarize(turnCtx, renderMessages(older))
+	if err != nil || summary == "" {
+		// Cancelled or failed: leave history intact. A cancel ends the turn via
+		// the normal turnCtx.Err() checks in runTurn; a failure just proceeds on
+		// the raw window.
+		return
+	}
+	prevLen := len(r.history)
+	r.history = chmctx.ApplyCompaction(r.history, split, summary)
+	auto := true
+	r.emit(event{
+		V: V, Type: "compacted",
+		Auto:       &auto,
+		Text:       summary,
+		HistoryLen: len(r.history),
+		Message:    fmt.Sprintf("auto-compacted %d earlier messages to fit the context window", prevLen-len(r.history)+1),
+	})
+}
 
 func (r *Runner) runCompact() {
 	turnCtx, cancel := context.WithCancel(context.Background())
@@ -526,33 +596,17 @@ func (r *Runner) runCompact() {
 		return
 	}
 
-	msgs := []chmctx.Message{
-		{Role: chmctx.RoleSystem, Content: compactSystemPrompt},
-		{Role: chmctx.RoleUser, Content: "Conversation to summarize:\n\n" + r.renderTranscript()},
-	}
-
-	var sb strings.Builder
-	for ev := range r.client.Chat(turnCtx, msgs, nil) {
-		switch ev.Kind {
-		case llm.EventContent:
-			sb.WriteString(ev.Content)
-		case llm.EventError:
-			if turnCtx.Err() != nil {
-				r.finishTurn(event{V: V, Type: "turn_done"})
-				return
-			}
-			nonFatal := false
-			r.finishTurn(event{V: V, Type: "error", Fatal: &nonFatal,
-				Message: "compact failed: " + ev.Err.Error()})
+	summary, err := r.summarize(turnCtx, r.renderTranscript())
+	if err != nil {
+		if turnCtx.Err() != nil {
+			r.finishTurn(event{V: V, Type: "turn_done"})
 			return
 		}
-	}
-	if turnCtx.Err() != nil { // cancelled after the stream closed cleanly
-		r.finishTurn(event{V: V, Type: "turn_done"})
+		nonFatal := false
+		r.finishTurn(event{V: V, Type: "error", Fatal: &nonFatal,
+			Message: "compact failed: " + err.Error()})
 		return
 	}
-
-	summary := strings.TrimSpace(sb.String())
 	if summary == "" {
 		nonFatal := false
 		r.finishTurn(event{V: V, Type: "error", Fatal: &nonFatal,
@@ -569,13 +623,13 @@ func (r *Runner) runCompact() {
 	})
 }
 
-// renderTranscript flattens history into a plain-text transcript for the
-// summarizer, capped to roughly fit the active context (keeping the most recent
-// text) so a huge history can't overflow the summarization request itself.
-func (r *Runner) renderTranscript() string {
+// renderMessages flattens a span of history into a plain-text transcript for the
+// summariser, uncapped: maybeAutoCompact only ever hands it the older span,
+// which SplitForCompaction already bounded to well under the window.
+func renderMessages(msgs []chmctx.Message) string {
 	var b strings.Builder
-	for i := range r.history {
-		m := &r.history[i]
+	for i := range msgs {
+		m := &msgs[i]
 		switch m.Role {
 		case chmctx.RoleUser:
 			b.WriteString("USER: ")
@@ -596,7 +650,15 @@ func (r *Runner) renderTranscript() string {
 		}
 		b.WriteString("\n\n")
 	}
-	s := b.String()
+	return b.String()
+}
+
+// renderTranscript flattens the WHOLE history into a plain-text transcript for
+// the manual compact, capped to roughly fit the active context (keeping the most
+// recent text) so a huge history can't overflow the summarization request
+// itself.
+func (r *Runner) renderTranscript() string {
+	s := renderMessages(r.history)
 	// Cap to ~60% of the context (chars ≈ tokens*4) so the summarization request
 	// itself fits; keep the most recent tail, which matters most.
 	if maxChars := r.activeContextSize() * 4 * 6 / 10; maxChars > 0 && len(s) > maxChars {
