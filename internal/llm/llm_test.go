@@ -64,6 +64,9 @@ func TestChatStreamsContent(t *testing.T) {
 	if !strings.Contains(gotBody, `"reasoning_effort":"high"`) {
 		t.Fatalf("reasoning_effort must default to 'high' (server-driven fallback only): %s", gotBody)
 	}
+	if !strings.Contains(gotBody, `"frequency_penalty":0.3`) || !strings.Contains(gotBody, `"presence_penalty":0.3`) {
+		t.Fatalf("default repetition penalties must ride on every chat: %s", gotBody)
+	}
 
 	var content strings.Builder
 	var sawDone bool
@@ -855,6 +858,34 @@ func TestIdleTimeoutFromEnv(t *testing.T) {
 		}
 		if got := idleTimeoutFromEnv(); got != tc.want {
 			t.Errorf("idleTimeoutFromEnv(%q, set=%v) = %v, want %v", tc.val, tc.set, got, tc.want)
+		}
+	}
+}
+
+// TestPenaltyFromEnv pins the CODEHAMR_FREQUENCY_PENALTY / _PRESENCE_PENALTY
+// contract: a parseable float wins (0 is legal and disables the penalty),
+// unset or garbage falls back to the built-in default.
+func TestPenaltyFromEnv(t *testing.T) {
+	cases := []struct {
+		val  string
+		set  bool
+		want float64
+	}{
+		{set: false, want: 0.5},
+		{val: "", set: true, want: 0.5},
+		{val: "0", set: true, want: 0},
+		{val: "0.8", set: true, want: 0.8},
+		{val: "-0.2", set: true, want: -0.2},
+		{val: "garbage", set: true, want: 0.5},
+	}
+	for _, tc := range cases {
+		if tc.set {
+			t.Setenv("CODEHAMR_FREQUENCY_PENALTY", tc.val)
+		} else {
+			os.Unsetenv("CODEHAMR_FREQUENCY_PENALTY")
+		}
+		if got := penaltyFromEnv("CODEHAMR_FREQUENCY_PENALTY", 0.5); got != tc.want {
+			t.Errorf("penaltyFromEnv(%q, set=%v) = %v, want %v", tc.val, tc.set, got, tc.want)
 		}
 	}
 }

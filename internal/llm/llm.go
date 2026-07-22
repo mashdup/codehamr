@@ -98,6 +98,15 @@ type chatRequest struct {
 	Stream          bool           `json:"stream"`
 	StreamOptions   *streamOptions `json:"stream_options,omitempty"`
 	ReasoningEffort string         `json:"reasoning_effort,omitempty"`
+	// FrequencyPenalty and PresencePenalty curb the two failure modes users
+	// see with reasoning models: repeated/looping thoughts (frequency scales
+	// the penalty by how often a token already appeared) and overlong,
+	// wandering chains (presence penalizes any already-seen token once,
+	// nudging toward wrapping up). OpenAI-standard, honored by Ollama's /v1
+	// shim; both are omitempty so a 0 value (penalty off) drops the field and
+	// leaves the server's own default in force.
+	FrequencyPenalty float64 `json:"frequency_penalty,omitempty"`
+	PresencePenalty  float64 `json:"presence_penalty,omitempty"`
 }
 
 // streamOptions: without include_usage, OpenAI-compatible servers omit the
@@ -262,6 +271,12 @@ type Client struct {
 	// o-series models). Valid: "low", "medium", "high", "off" (omit the field
 	// entirely). Empty (default) means "high".
 	ReasoningEffort string
+	// FrequencyPenalty and PresencePenalty are sent on every chat to discourage
+	// looping/repeated thoughts and overlong reasoning. Defaults come from
+	// penaltiesFromEnv (0 = off, field dropped, server default in force); fields
+	// not bare consts so tests can set them. New writes them and nothing else.
+	FrequencyPenalty float64
+	PresencePenalty  float64
 	// noReasoningEffort goes true once the server 400s on reasoning for this
 	// model (newer OpenAI models reject tools + reasoning_effort here, pushing
 	// that combo onto /v1/responses; Ollama rejects it on non-thinking models).
@@ -282,14 +297,39 @@ type Client struct {
 // bounded by Go's default Dialer (30s).
 func New(base, model, token, reasoningEffort string) *Client {
 	return &Client{
-		BaseURL:         strings.TrimRight(base, "/"),
-		ChatURL:         chatCompletionsURL(base),
-		Model:           model,
-		Token:           token,
-		HTTP:            &http.Client{},
-		IdleTimeout:     idleTimeoutFromEnv(),
-		ReasoningEffort: reasoningEffort,
+		BaseURL:          strings.TrimRight(base, "/"),
+		ChatURL:          chatCompletionsURL(base),
+		Model:            model,
+		Token:            token,
+		HTTP:             &http.Client{},
+		IdleTimeout:      idleTimeoutFromEnv(),
+		ReasoningEffort:  reasoningEffort,
+		FrequencyPenalty: penaltyFromEnv("CODEHAMR_FREQUENCY_PENALTY", defaultFrequencyPenalty),
+		PresencePenalty:  penaltyFromEnv("CODEHAMR_PRESENCE_PENALTY", defaultPresencePenalty),
 	}
+}
+
+// defaultFrequencyPenalty and defaultPresencePenalty are the built-in penalties
+// applied to every chat, chosen small so they curb runaway repetition and
+// overlong reasoning without distorting normal token choice. Override either
+// with CODEHAMR_FREQUENCY_PENALTY / CODEHAMR_PRESENCE_PENALTY (a float; 0
+// disables and lets the server's own default stand).
+const (
+	defaultFrequencyPenalty = 0.3
+	defaultPresencePenalty  = 0.3
+)
+
+// penaltyFromEnv resolves one penalty override: a parseable float wins (0 is a
+// legal value meaning "off"), anything unset or malformed falls back to def.
+func penaltyFromEnv(key string, def float64) float64 {
+	v := strings.TrimSpace(os.Getenv(key))
+	if v == "" {
+		return def
+	}
+	if f, err := strconv.ParseFloat(v, 64); err == nil {
+		return f
+	}
+	return def
 }
 
 // chatCompletionsURL resolves the chat-completions endpoint from a configured
@@ -450,12 +490,14 @@ func (c *Client) reasoningEffort() string {
 // body is closed on every non-200 branch; 200 leaves it open for the caller.
 func (c *Client) sendChat(parent context.Context, msgs []chmctx.Message, tools []Tool) (*http.Response, *Event) {
 	resp, budget, err := c.postChat(parent, chatRequest{
-		Model:           c.Model,
-		Messages:        toWire(msgs),
-		Tools:           tools,
-		Stream:          true,
-		StreamOptions:   &streamOptions{IncludeUsage: true},
-		ReasoningEffort: c.reasoningEffort(),
+		Model:            c.Model,
+		Messages:         toWire(msgs),
+		Tools:            tools,
+		Stream:           true,
+		StreamOptions:    &streamOptions{IncludeUsage: true},
+		ReasoningEffort:  c.reasoningEffort(),
+		FrequencyPenalty: c.FrequencyPenalty,
+		PresencePenalty:  c.PresencePenalty,
 	})
 	if err != nil {
 		return nil, &Event{Kind: EventError, Err: err, Budget: budget}

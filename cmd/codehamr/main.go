@@ -144,7 +144,9 @@ Config:
 
 Env:
   CODEHAMR_URL            override the active profile's url at runtime
-  CODEHAMR_IDLE_TIMEOUT   stream idle timeout, e.g. 90m or 1h (default 1h)`))
+  CODEHAMR_IDLE_TIMEOUT   stream idle timeout, e.g. 90m or 1h (default 1h)
+  CODEHAMR_FREQUENCY_PENALTY  repetition penalty, float (default 0.3, 0=off)
+  CODEHAMR_PRESENCE_PENALTY   overlong-reasoning penalty, float (default 0.3, 0=off)`))
 }
 
 // isLocalBuild reports whether the binary came from a working tree rather
